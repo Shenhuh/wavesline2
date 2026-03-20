@@ -1,15 +1,26 @@
-// app/login/page.tsx
+import { Suspense } from "react";
 import LoginForm from "./LoginForm";
+
+function LoginFallback() {
+  return (
+    <div className="mt-6 rounded-xl border border-black/10 bg-[#f5f7fa] px-4 py-3 text-sm text-[#677388]">
+      Loading login...
+    </div>
+  );
+}
 
 export default function LoginPage() {
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#d7dbe2] p-4">
-      <div className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-6 shadow-xl">
-        <h1 className="text-2xl font-bold text-[#2a313d]">Login</h1>
+    <main className="min-h-screen bg-[#eef1f5] px-4 py-10">
+      <div className="mx-auto max-w-md rounded-3xl border border-black/10 bg-white p-8 shadow-xl">
+        <h1 className="text-3xl font-bold text-[#2a313d]">Welcome back</h1>
         <p className="mt-2 text-sm text-[#677388]">
-          Sign in or create an account to continue.
+          Sign in to continue to Wavesline.
         </p>
-        <LoginForm />
+
+        <Suspense fallback={<LoginFallback />}>
+          <LoginForm />
+        </Suspense>
       </div>
     </main>
   );
