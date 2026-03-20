@@ -1,93 +1,53 @@
 // app/admin/relationships/[id]/page.tsx
-
 import Link from "next/link";
 import { createAdminClient } from "@/lib/supabase/admin";
 import RelationshipForm from "../RelationshipForm";
-import {
-  deleteRelationshipAction,
-  updateRelationshipAction,
-} from "../actions";
-import {
-  rowToRelationshipFormValues,
-  type CharacterOption,
-  type RelationshipRow,
-} from "@/lib/admin/relationships";
+import { deleteRelationshipAction, updateRelationshipAction } from "../actions";
+import { rowToRelationshipFormValues, type CharacterOption, type RelationshipRow } from "@/lib/admin/relationships";
 
-export default async function EditRelationshipPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
+export default async function EditRelationshipPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const supabase = createAdminClient();
 
-  const [{ data: relationshipData, error: relationshipError }, { data: charactersData, error: charactersError }] =
-    await Promise.all([
-      supabase
-        .from("character_relationships")
-        .select("*")
-        .eq("id", id)
-        .single(),
-      supabase
-        .from("characters")
-        .select("id, name, key")
-        .order("name", { ascending: true }),
-    ]);
+  const [{ data: relData, error: relError }, { data: charData, error: charError }] = await Promise.all([
+    supabase.from("character_relationships").select("*").eq("id", id).single(),
+    supabase.from("characters").select("id, name, key").order("name", { ascending: true }),
+  ]);
 
-  if (relationshipError || !relationshipData) {
-    throw new Error(relationshipError?.message || "Relationship not found.");
-  }
+  if (relError || !relData) throw new Error(relError?.message || "Relationship not found.");
+  if (charError) throw new Error(charError.message);
 
-  if (charactersError) {
-    throw new Error(charactersError.message);
-  }
-
-  const relationship = relationshipData as RelationshipRow;
-  const characters = (charactersData ?? []) as CharacterOption[];
+  const relationship = relData as RelationshipRow;
+  const characters = (charData ?? []) as CharacterOption[];
   const values = rowToRelationshipFormValues(relationship);
-
   const updateAction = updateRelationshipAction.bind(null, id);
   const removeAction = deleteRelationshipAction.bind(null, id);
 
   return (
-    <main className="min-h-screen bg-[#d7dbe2] p-6">
-      <div className="mx-auto max-w-4xl rounded-2xl border border-black/10 bg-white p-6 shadow-xl">
-        <div className="mb-6 flex items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-[#2a313d]">
-              Edit Relationship
-            </h1>
-            <p className="mt-1 text-sm text-[#677388]">
-              Update relationship values and notes.
-            </p>
-          </div>
-
-          <Link
-            href="/admin/relationships"
-            className="rounded-xl border border-black/10 px-4 py-2 font-semibold text-[#2a313d]"
-          >
-            Back
-          </Link>
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#23252f", margin: 0, letterSpacing: "-0.3px" }}>Edit Relationship</h1>
+          <p style={{ fontSize: 13, color: "rgba(35,37,47,0.5)", margin: "4px 0 0" }}>Update relationship values and notes.</p>
         </div>
-
-        <RelationshipForm
-          values={values}
-          characters={characters}
-          submitLabel="Save Changes"
-          action={updateAction}
-        />
-
-        <div className="mt-8 border-t border-black/10 pt-6">
-          <form action={removeAction}>
-            <button
-              type="submit"
-              className="rounded-xl border border-red-300 px-4 py-2 font-semibold text-red-700"
-            >
-              Delete Relationship
-            </button>
-          </form>
-        </div>
+        <Link href="/admin/relationships" style={{ fontSize: 13, fontWeight: 500, color: "rgba(35,37,47,0.5)", textDecoration: "none" }}>
+          ← All relationships
+        </Link>
       </div>
-    </main>
+
+      <RelationshipForm values={values} characters={characters} submitLabel="Save Changes" action={updateAction} />
+
+      <div style={{ marginTop: 20, background: "white", borderRadius: 12, border: "1px solid rgba(220,38,38,0.15)", padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#23252f" }}>Delete this relationship</div>
+          <div style={{ fontSize: 12, color: "rgba(35,37,47,0.4)", marginTop: 2 }}>This action cannot be undone.</div>
+        </div>
+        <form action={removeAction}>
+          <button type="submit" style={{ borderRadius: 8, padding: "8px 18px", fontSize: 13, fontWeight: 600, color: "#991b1b", background: "white", border: "1px solid rgba(220,38,38,0.3)", cursor: "pointer", fontFamily: "inherit" }}>
+            Delete
+          </button>
+        </form>
+      </div>
+    </div>
   );
 }

@@ -1,11 +1,5 @@
-import {
-  FIELD_LABELS,
-  listPendingSubmissions,
-} from "@/lib/character-submissions";
-import {
-  approveSubmissionAction,
-  rejectSubmissionAction,
-} from "./actions";
+import { FIELD_LABELS, listPendingSubmissions } from "@/lib/character-submissions";
+import { approveSubmissionAction, rejectSubmissionAction } from "./actions";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 type AdminSubmissionHistoryRow = {
@@ -23,96 +17,41 @@ type AdminSubmissionHistoryRow = {
   approved_by: string | null;
   created_at: string;
   updated_at: string;
-  character: {
-    id: string;
-    name: string;
-    key: string;
-  } | null;
+  character: { id: string; name: string; key: string } | null;
 };
 
 async function listSubmissionHistory(): Promise<AdminSubmissionHistoryRow[]> {
   const supabase = createAdminClient();
-
   const { data, error } = await supabase
     .from("character_field_submissions")
-    .select(
-      `
-      *,
-      character:characters (
-        id,
-        name,
-        key
-      )
-    `
-    )
+    .select("*, character:characters(id,name,key)")
     .neq("status", "pending")
-    .order("updated_at", { ascending: false })
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
+    .order("updated_at", { ascending: false });
+  if (error) throw new Error(error.message);
   return ((data ?? []) as any[]).map((row) => ({
     ...row,
     character: Array.isArray(row.character) ? row.character[0] ?? null : row.character,
   }));
 }
 
-function formatDate(value?: string | null) {
+function fmt(value?: string | null) {
   if (!value) return "—";
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-
-  return date.toLocaleString();
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString();
 }
 
-function StatusBadge({
-  status,
-}: {
-  status: "pending" | "approved" | "rejected";
-}) {
-  const className =
-    status === "approved"
-      ? "bg-green-100 text-green-700"
-      : status === "rejected"
-      ? "bg-red-100 text-red-700"
-      : "bg-amber-100 text-amber-700";
-
+function StatusPill({ status }: { status: "pending" | "approved" | "rejected" }) {
+  const map = {
+    pending:  { bg: "#fef3c7", color: "#92400e", label: "Pending" },
+    approved: { bg: "#d1fae5", color: "#065f46", label: "Approved ✓" },
+    rejected: { bg: "#fee2e2", color: "#991b1b", label: "Rejected" },
+  };
+  const s = map[status];
   return (
-    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${className}`}>
-      {status}
+    <span style={{ display: "inline-block", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700, background: s.bg, color: s.color }}>
+      {s.label}
     </span>
   );
-}
-
-function SuccessNotice({ done }: { done?: string }) {
-  if (done === "approved") {
-    return (
-      <div className="mb-5 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
-        Submission approved.
-      </div>
-    );
-  }
-
-  if (done === "rejected") {
-    return (
-      <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-        Submission rejected.
-      </div>
-    );
-  }
-
-  if (done === "missing") {
-    return (
-      <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-        Missing submission id.
-      </div>
-    );
-  }
-
-  return null;
 }
 
 export default async function AdminSubmissionsPage({
@@ -122,219 +61,153 @@ export default async function AdminSubmissionsPage({
 }) {
   const params = searchParams ? await searchParams : {};
   const done = params?.done;
+  const [pending, history] = await Promise.all([listPendingSubmissions(), listSubmissionHistory()]);
 
-  const [pendingSubmissions, historySubmissions] = await Promise.all([
-    listPendingSubmissions(),
-    listSubmissionHistory(),
-  ]);
+  const card: React.CSSProperties = {
+    background: "white", borderRadius: 12, border: "1px solid rgba(0,0,0,0.07)",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.05)", marginBottom: 12, overflow: "hidden",
+  };
 
   return (
-    <div className="rounded-2xl border border-black/10 bg-white p-6 shadow-xl">
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold text-[#2a313d]">Community Submissions</h1>
-        <p className="mt-1 text-sm text-[#677388]">
-          Review proposals, approve them into character data, and keep a record of past decisions.
-        </p>
+    <div>
+      {/* Header */}
+      <div style={{ marginBottom: 24 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: "#23252f", margin: 0, letterSpacing: "-0.3px" }}>Community Submissions</h1>
+        <p style={{ fontSize: 13, color: "rgba(35,37,47,0.5)", margin: "4px 0 0" }}>Review proposals and approve them into character data.</p>
       </div>
 
-      <SuccessNotice done={done} />
+      {/* Notice */}
+      {done === "approved" && (
+        <div style={{ background: "#d1fae5", borderRadius: 10, padding: "10px 16px", fontSize: 13, color: "#065f46", marginBottom: 16 }}>✓ Submission approved.</div>
+      )}
+      {done === "rejected" && (
+        <div style={{ background: "#fee2e2", borderRadius: 10, padding: "10px 16px", fontSize: 13, color: "#991b1b", marginBottom: 16 }}>Submission rejected.</div>
+      )}
 
-      <div className="space-y-8">
-        <section>
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-xl font-bold text-[#2a313d]">Pending Submissions</h2>
-              <p className="mt-1 text-sm text-[#677388]">
-                These are still waiting for admin review.
-              </p>
-            </div>
+      {/* Pending */}
+      <div style={{ marginBottom: 32 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 700, color: "#23252f", margin: 0 }}>Pending Review</h2>
+          <span style={{ background: "#23252f", color: "white", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+            {pending.length}
+          </span>
+        </div>
 
-            <span className="rounded-full bg-[#23252f] px-3 py-1 text-xs font-semibold text-white">
-              {pendingSubmissions.length} pending
-            </span>
+        {pending.length === 0 ? (
+          <div style={{ background: "white", borderRadius: 12, border: "1px dashed rgba(0,0,0,0.1)", padding: 24, textAlign: "center", fontSize: 13, color: "rgba(35,37,47,0.4)" }}>
+            No pending submissions. 🎉
           </div>
+        ) : (
+          pending.map((sub) => (
+            <div key={sub.id} style={card}>
+              {/* Card header */}
+              <div style={{ padding: "12px 16px", background: "#f6f7f9", borderBottom: "1px solid rgba(0,0,0,0.06)", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                <span style={{ display: "inline-block", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700, background: "#23252f", color: "white" }}>
+                  {sub.character?.name ?? "Unknown"}
+                </span>
+                <span style={{ display: "inline-block", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700, background: "rgba(35,37,47,0.08)", color: "#23252f" }}>
+                  {FIELD_LABELS[sub.field_name]}
+                </span>
+                <StatusPill status="pending" />
+                <span style={{ fontSize: 12, color: "rgba(35,37,47,0.45)", marginLeft: 4 }}>
+                  by {sub.submitted_by_name || "Anonymous"} · ▲ {sub.upvotes} / ▼ {sub.downvotes} · {fmt(sub.created_at)}
+                </span>
+              </div>
 
-          {pendingSubmissions.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-black/10 p-4 text-[#677388]">
-              No pending submissions.
-            </div>
-          ) : (
-            <div className="space-y-5">
-              {pendingSubmissions.map((submission) => (
-                <div
-                  key={submission.id}
-                  className="rounded-2xl border border-black/10 bg-[#fafbfc] p-5"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-full bg-[#23252f] px-3 py-1 text-xs font-semibold text-white">
-                      {submission.character?.name ?? "Unknown"}
-                    </span>
-
-                    <span className="rounded-full bg-[#e8edf5] px-3 py-1 text-xs font-semibold text-[#2a313d]">
-                      {FIELD_LABELS[submission.field_name]}
-                    </span>
-
-                    <StatusBadge status="pending" />
-
-                    <span className="text-xs text-[#677388]">
-                      by {submission.submitted_by_name || "Anonymous"}
-                    </span>
-
-                    <span className="text-xs text-[#677388]">
-                      ▲ {submission.upvotes} / ▼ {submission.downvotes}
-                    </span>
-
-                    <span className="text-xs text-[#677388]">
-                      submitted {formatDate(submission.created_at)}
-                    </span>
-                  </div>
-
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    <div>
-                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#677388]">
-                        Current
-                      </div>
-                      <div className="rounded-xl bg-white px-4 py-3 text-sm whitespace-pre-wrap text-[#23252f]/75">
-                        {submission.current_value || "—"}
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#677388]">
-                        Proposed
-                      </div>
-                      <div className="rounded-xl bg-[#eef6ff] px-4 py-3 text-sm whitespace-pre-wrap text-[#23252f]">
-                        {submission.proposed_value}
-                      </div>
+              {/* Body */}
+              <div style={{ padding: 16 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: sub.reason ? 12 : 0 }}>
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "rgba(35,37,47,0.4)", marginBottom: 6 }}>Current</div>
+                    <div style={{ fontSize: 13, color: "rgba(35,37,47,0.65)", background: "#f6f7f9", borderRadius: 8, padding: "10px 12px", whiteSpace: "pre-wrap", lineHeight: 1.6, minHeight: 40 }}>
+                      {sub.current_value || <em style={{ color: "rgba(35,37,47,0.3)" }}>Nothing set</em>}
                     </div>
                   </div>
-
-                  {submission.reason ? (
-                    <div className="mt-4">
-                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#677388]">
-                        Reason
-                      </div>
-                      <div className="rounded-xl bg-white px-4 py-3 text-sm whitespace-pre-wrap text-[#23252f]/80">
-                        {submission.reason}
-                      </div>
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "rgba(35,37,47,0.4)", marginBottom: 6 }}>Proposed</div>
+                    <div style={{ fontSize: 13, color: "#23252f", background: "#eef6ff", borderRadius: 8, padding: "10px 12px", whiteSpace: "pre-wrap", lineHeight: 1.6, border: "1px solid rgba(59,130,246,0.1)" }}>
+                      {sub.proposed_value}
                     </div>
-                  ) : null}
-
-                  <div className="mt-4 flex gap-3">
-                    <form action={approveSubmissionAction}>
-                      <input type="hidden" name="submissionId" value={submission.id} />
-                      <button
-                        type="submit"
-                        className="rounded-xl bg-[#23252f] px-4 py-2 font-semibold text-white"
-                      >
-                        Approve
-                      </button>
-                    </form>
-
-                    <form action={rejectSubmissionAction}>
-                      <input type="hidden" name="submissionId" value={submission.id} />
-                      <button
-                        type="submit"
-                        className="rounded-xl border border-red-300 px-4 py-2 font-semibold text-red-600"
-                      >
-                        Reject
-                      </button>
-                    </form>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </section>
 
-        <section className="border-t border-black/10 pt-8">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-xl font-bold text-[#2a313d]">Submission History</h2>
-              <p className="mt-1 text-sm text-[#677388]">
-                Previously reviewed submissions, including approved and rejected ones.
-              </p>
-            </div>
-
-            <span className="rounded-full bg-[#e8edf5] px-3 py-1 text-xs font-semibold text-[#2a313d]">
-              {historySubmissions.length} reviewed
-            </span>
-          </div>
-
-          {historySubmissions.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-black/10 p-4 text-[#677388]">
-              No submission history yet.
-            </div>
-          ) : (
-            <div className="space-y-5">
-              {historySubmissions.map((submission) => (
-                <div
-                  key={submission.id}
-                  className="rounded-2xl border border-black/10 bg-white p-5"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-full bg-[#23252f] px-3 py-1 text-xs font-semibold text-white">
-                      {submission.character?.name ?? "Unknown"}
-                    </span>
-
-                    <span className="rounded-full bg-[#e8edf5] px-3 py-1 text-xs font-semibold text-[#2a313d]">
-                      {FIELD_LABELS[submission.field_name]}
-                    </span>
-
-                    <StatusBadge status={submission.status} />
-
-                    <span className="text-xs text-[#677388]">
-                      by {submission.submitted_by_name || "Anonymous"}
-                    </span>
-
-                    <span className="text-xs text-[#677388]">
-                      ▲ {submission.upvotes} / ▼ {submission.downvotes}
-                    </span>
-
-                    <span className="text-xs text-[#677388]">
-                      reviewed {formatDate(submission.updated_at)}
-                    </span>
-
-                    <span className="text-xs text-[#677388]">
-                      admin: {submission.approved_by || "—"}
-                    </span>
-                  </div>
-
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    <div>
-                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#677388]">
-                        Current at time of submission
-                      </div>
-                      <div className="rounded-xl bg-[#f8fafc] px-4 py-3 text-sm whitespace-pre-wrap text-[#23252f]/75">
-                        {submission.current_value || "—"}
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#677388]">
-                        Proposed
-                      </div>
-                      <div className="rounded-xl bg-[#eef6ff] px-4 py-3 text-sm whitespace-pre-wrap text-[#23252f]">
-                        {submission.proposed_value}
-                      </div>
+                {sub.reason && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "rgba(35,37,47,0.4)", marginBottom: 6 }}>Reason</div>
+                    <div style={{ fontSize: 13, color: "rgba(35,37,47,0.7)", background: "#fffbeb", borderRadius: 8, padding: "10px 12px", lineHeight: 1.6, fontStyle: "italic", border: "1px solid rgba(245,158,11,0.15)" }}>
+                      "{sub.reason}"
                     </div>
                   </div>
+                )}
 
-                  {submission.reason ? (
-                    <div className="mt-4">
-                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-[#677388]">
-                        Reason
-                      </div>
-                      <div className="rounded-xl bg-[#fafafa] px-4 py-3 text-sm whitespace-pre-wrap text-[#23252f]/80">
-                        {submission.reason}
-                      </div>
-                    </div>
-                  ) : null}
+                {/* Actions */}
+                <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                  <form action={approveSubmissionAction}>
+                    <input type="hidden" name="submissionId" value={sub.id} />
+                    <button type="submit" style={{ borderRadius: 8, padding: "8px 20px", fontSize: 13, fontWeight: 700, color: "white", background: "#23252f", border: "none", cursor: "pointer", fontFamily: "inherit" }}>
+                      ✓ Approve
+                    </button>
+                  </form>
+                  <form action={rejectSubmissionAction}>
+                    <input type="hidden" name="submissionId" value={sub.id} />
+                    <button type="submit" style={{ borderRadius: 8, padding: "8px 20px", fontSize: 13, fontWeight: 700, color: "#991b1b", background: "white", border: "1px solid rgba(220,38,38,0.3)", cursor: "pointer", fontFamily: "inherit" }}>
+                      Reject
+                    </button>
+                  </form>
                 </div>
-              ))}
+              </div>
             </div>
-          )}
-        </section>
+          ))
+        )}
+      </div>
+
+      {/* History */}
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 700, color: "#23252f", margin: 0 }}>Review History</h2>
+          <span style={{ background: "rgba(35,37,47,0.08)", color: "#23252f", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+            {history.length}
+          </span>
+        </div>
+
+        {history.length === 0 ? (
+          <div style={{ background: "white", borderRadius: 12, border: "1px dashed rgba(0,0,0,0.1)", padding: 24, textAlign: "center", fontSize: 13, color: "rgba(35,37,47,0.4)" }}>
+            No history yet.
+          </div>
+        ) : (
+          history.map((sub) => (
+            <div key={sub.id} style={card}>
+              <div style={{ padding: "12px 16px", background: "#f6f7f9", borderBottom: "1px solid rgba(0,0,0,0.06)", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                <span style={{ display: "inline-block", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700, background: "#23252f", color: "white" }}>
+                  {sub.character?.name ?? "Unknown"}
+                </span>
+                <span style={{ display: "inline-block", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700, background: "rgba(35,37,47,0.08)", color: "#23252f" }}>
+                  {FIELD_LABELS[sub.field_name]}
+                </span>
+                <StatusPill status={sub.status} />
+                <span style={{ fontSize: 12, color: "rgba(35,37,47,0.45)", marginLeft: 4 }}>
+                  by {sub.submitted_by_name || "Anonymous"} · ▲ {sub.upvotes} / ▼ {sub.downvotes} · reviewed {fmt(sub.updated_at)}
+                </span>
+              </div>
+              <div style={{ padding: 16 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "rgba(35,37,47,0.4)", marginBottom: 6 }}>Was</div>
+                    <div style={{ fontSize: 13, color: "rgba(35,37,47,0.55)", background: "#f6f7f9", borderRadius: 8, padding: "10px 12px", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+                      {sub.current_value || "—"}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "rgba(35,37,47,0.4)", marginBottom: 6 }}>Proposed</div>
+                    <div style={{ fontSize: 13, color: "#23252f", background: sub.status === "approved" ? "#f0fdf4" : "#fafafa", borderRadius: 8, padding: "10px 12px", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+                      {sub.proposed_value}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
