@@ -5,33 +5,20 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export type ActiveGameEvent = {
   id: string;
   title: string;
-  summary: string;
-  details: string | null;
-  region: string | null;
-  faction: string | null;
+  slug: string;
+  order: number;
   importance: number;
-  status: "upcoming" | "active" | "ended";
-  affected_character_keys: string[];
-  starts_at: string | null;
-  ends_at: string | null;
+  details: string | null;
+  involved_characters: string[];
 };
 
-function toTime(value: string | null | undefined) {
-  if (!value) return 0;
-  const n = new Date(value).getTime();
-  return Number.isFinite(n) ? n : 0;
-}
-
-function statusRank(status: string) {
-  if (status === "active") return 3;
-  if (status === "upcoming") return 2;
-  if (status === "ended") return 1;
-  return 0;
-}
-
 function isCharacterSpecific(event: ActiveGameEvent, characterKey: string) {
-  const keys = Array.isArray(event.affected_character_keys)
-    ? event.affected_character_keys
+  const keys = Array.isArray(event.involved_characters)
+    ? event.involved_characters.map((entry) => {
+        const raw = String(entry ?? "").trim();
+        const keyPart = raw.split("—")[0]?.split("-")[0]?.trim();
+        return keyPart || raw;
+      })
     : [];
 
   return keys.includes(characterKey);
@@ -43,39 +30,49 @@ export async function getRelevantEventsForCharacter(args: {
 }): Promise<ActiveGameEvent[]> {
   const { characterKey, limit = 5 } = args;
   const supabase = createAdminClient();
-  const now = new Date().toISOString();
 
   const { data, error } = await supabase
     .from("game_events")
-    .select("*")
-    .in("status", ["active", "upcoming"])
-    .or(`starts_at.is.null,starts_at.lte.${now}`)
+    .select("id, title, slug, order, importance, details, involved_characters")
+    .order("order", { ascending: true })
     .limit(50);
 
   if (error) throw new Error(error.message);
 
-  const rows = (data ?? []) as ActiveGameEvent[];
+  const rows = ((data ?? []) as Partial<ActiveGameEvent>[]).map((event) => ({
+    id: String(event.id ?? ""),
+    title: String(event.title ?? ""),
+    slug: String(event.slug ?? ""),
+    order: Number.isFinite(Number(event.order)) ? Number(event.order) : 0,
+    importance: Number.isFinite(Number(event.importance))
+      ? Number(event.importance)
+      : 1,
+    details: event.details ? String(event.details) : null,
+    involved_characters: Array.isArray(event.involved_characters)
+      ? event.involved_characters.map((x) => String(x))
+      : [],
+  }));
 
   const relevant = rows.filter((event) => {
-    const keys = Array.isArray(event.affected_character_keys)
-      ? event.affected_character_keys
+    const keys = Array.isArray(event.involved_characters)
+      ? event.involved_characters.map((entry) => {
+          const raw = String(entry ?? "").trim();
+          const keyPart = raw.split("—")[0]?.split("-")[0]?.trim();
+          return keyPart || raw;
+        })
       : [];
 
     return keys.length === 0 || keys.includes(characterKey);
   });
 
   relevant.sort((a, b) => {
-    const aStatus = statusRank(a.status);
-    const bStatus = statusRank(b.status);
-    if (bStatus !== aStatus) return bStatus - aStatus;
-
     const aSpecific = isCharacterSpecific(a, characterKey) ? 1 : 0;
     const bSpecific = isCharacterSpecific(b, characterKey) ? 1 : 0;
     if (bSpecific !== aSpecific) return bSpecific - aSpecific;
 
     if (b.importance !== a.importance) return b.importance - a.importance;
 
-    return toTime(b.starts_at) - toTime(a.starts_at);
+    return a.order - b.order;
   });
 
   return relevant.slice(0, limit);
@@ -87,20 +84,25 @@ export function buildEventContextBlock(events: ActiveGameEvent[]) {
   return [
     "CURRENT WORLD EVENTS",
     ...events.map((event, i) => {
+      const involved =
+        Array.isArray(event.involved_characters) &&
+        event.involved_characters.length > 0
+          ? `Involved Characters: ${event.involved_characters.join(", ")}`
+          : "";
+
       const parts = [
         `${i + 1}. ${event.title}`,
-        `Status: ${event.status}`,
+        `Slug: ${event.slug}`,
+        `Order: ${event.order}`,
         `Importance: ${event.importance}`,
-        event.region ? `Region: ${event.region}` : "",
-        event.faction ? `Faction: ${event.faction}` : "",
-        `Summary: ${event.summary}`,
         event.details ? `Details: ${event.details}` : "",
+        involved,
       ].filter(Boolean);
 
       return parts.join(" | ");
     }),
-    "Prioritize active and character-relevant events over general background ones.",
-    "If relevant, let these events subtly influence what the character knows, references, worries about, or prioritizes.",
+    "Prioritize events that directly involve the current character.",
+    "Let these events subtly influence what the character knows, references, worries about, or prioritizes.",
     "Do not force event mentions if the current message does not benefit from it.",
   ].join("\n");
 }

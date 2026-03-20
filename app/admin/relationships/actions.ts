@@ -2,115 +2,95 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { clampStat } from "@/lib/admin/relationships";
 
-function getString(formData: FormData, key: string) {
-  return String(formData.get(key) ?? "").trim();
+type BulkRelationshipRow = {
+  targetCharacterId: string;
+  affinity: number;
+  trust: number;
+  familiarity: number;
+  notes: string;
+  enabled: boolean;
+};
+
+function clampStat(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(-100, Math.min(100, value));
 }
 
-function getNumber(formData: FormData, key: string, fallback = 0) {
-  const value = Number(String(formData.get(key) ?? "").trim());
-  return Number.isFinite(value) ? value : fallback;
-}
-
-export async function createRelationshipAction(formData: FormData) {
+export async function saveBulkRelationshipsAction(formData: FormData) {
   const supabase = createAdminClient();
 
-  const sourceCharacterId = getString(formData, "sourceCharacterId");
-  const targetCharacterId = getString(formData, "targetCharacterId");
-  const relationshipLabel = getString(formData, "relationshipLabel");
-  const affinity = clampStat(getNumber(formData, "affinity", 0));
-  const trust = clampStat(getNumber(formData, "trust", 0));
-  const familiarity = clampStat(getNumber(formData, "familiarity", 0));
-  const notes = getString(formData, "notes");
+  const sourceCharacterId = String(
+    formData.get("sourceCharacterId") ?? ""
+  ).trim();
 
-  if (!sourceCharacterId || !targetCharacterId) {
-    throw new Error("Both source and target characters are required.");
+  const relationshipsJson = String(
+    formData.get("relationshipsJson") ?? "[]"
+  );
+
+  if (!sourceCharacterId) {
+    throw new Error("Missing source character.");
   }
 
-  if (sourceCharacterId === targetCharacterId) {
-    throw new Error("A character cannot have a relationship with itself.");
+  let rows: BulkRelationshipRow[] = [];
+
+  try {
+    rows = JSON.parse(relationshipsJson) as BulkRelationshipRow[];
+  } catch {
+    throw new Error("Invalid relationship payload.");
   }
 
-  const { data, error } = await supabase
-    .from("character_relationships")
-    .insert({
+  for (const row of rows) {
+    const targetCharacterId = String(row.targetCharacterId ?? "").trim();
+    if (!targetCharacterId) continue;
+    if (targetCharacterId === sourceCharacterId) continue;
+
+    const payload = {
       source_character_id: sourceCharacterId,
       target_character_id: targetCharacterId,
-      relationship_label: relationshipLabel || null,
-      affinity,
-      trust,
-      familiarity,
-      notes: notes || null,
-    })
-    .select("id")
-    .single();
+      affinity: clampStat(Number(row.affinity)),
+      trust: clampStat(Number(row.trust)),
+      familiarity: clampStat(Number(row.familiarity)),
+      notes: String(row.notes ?? "").trim() || null,
+      enabled: row.enabled,
+      updated_at: new Date().toISOString(),
+    };
 
-  if (error) {
-    throw new Error(error.message);
+    const { data: existing, error: existingError } = await supabase
+      .from("character_relationships")
+      .select("id")
+      .eq("source_character_id", sourceCharacterId)
+      .eq("target_character_id", targetCharacterId)
+      .maybeSingle();
+
+    if (existingError) throw new Error(existingError.message);
+
+    if (existing?.id) {
+      const { error: updateError } = await supabase
+        .from("character_relationships")
+        .update(payload)
+        .eq("id", existing.id);
+
+      if (updateError) throw new Error(updateError.message);
+    } else {
+      // Only insert if there's actually something to save
+      if (
+        row.affinity !== 0 ||
+        row.trust !== 0 ||
+        row.familiarity !== 0 ||
+        row.notes.trim() !== "" ||
+        row.enabled
+      ) {
+        const { error: insertError } = await supabase
+          .from("character_relationships")
+          .insert({ ...payload, created_at: new Date().toISOString() });
+
+        if (insertError) throw new Error(insertError.message);
+      }
+    }
   }
 
   revalidatePath("/admin/relationships");
-  redirect(`/admin/relationships/${data.id}`);
-}
-
-export async function updateRelationshipAction(
-  relationshipId: string,
-  formData: FormData
-) {
-  const supabase = createAdminClient();
-
-  const sourceCharacterId = getString(formData, "sourceCharacterId");
-  const targetCharacterId = getString(formData, "targetCharacterId");
-  const relationshipLabel = getString(formData, "relationshipLabel");
-  const affinity = clampStat(getNumber(formData, "affinity", 0));
-  const trust = clampStat(getNumber(formData, "trust", 0));
-  const familiarity = clampStat(getNumber(formData, "familiarity", 0));
-  const notes = getString(formData, "notes");
-
-  if (!sourceCharacterId || !targetCharacterId) {
-    throw new Error("Both source and target characters are required.");
-  }
-
-  if (sourceCharacterId === targetCharacterId) {
-    throw new Error("A character cannot have a relationship with itself.");
-  }
-
-  const { error } = await supabase
-    .from("character_relationships")
-    .update({
-      source_character_id: sourceCharacterId,
-      target_character_id: targetCharacterId,
-      relationship_label: relationshipLabel || null,
-      affinity,
-      trust,
-      familiarity,
-      notes: notes || null,
-    })
-    .eq("id", relationshipId);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  revalidatePath("/admin/relationships");
-  revalidatePath(`/admin/relationships/${relationshipId}`);
-}
-
-export async function deleteRelationshipAction(relationshipId: string) {
-  const supabase = createAdminClient();
-
-  const { error } = await supabase
-    .from("character_relationships")
-    .delete()
-    .eq("id", relationshipId);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  revalidatePath("/admin/relationships");
-  redirect("/admin/relationships");
+  revalidatePath("/admin/relationships/new");
 }

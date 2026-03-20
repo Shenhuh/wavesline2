@@ -20,6 +20,7 @@ import AddContactModal from "./AddContactModal";
 import MobileSidebar from "./MobileSidebar";
 import SettingsMenu from "./SettingsMenu";
 import InfoModal from "./InfoModal";
+import ThreadList from "./ThreadList";
 
 function Avatar({
   src,
@@ -80,6 +81,31 @@ export default async function ChatPage({
   ]);
 
   if (!activeCharacter) redirect("/select");
+
+  // Fetch the latest contact message timestamp per thread for unread dot logic
+  const threadIds = threads.map((t) => t.id);
+  const lastMessageAtMap: Record<string, string | null> = {};
+  if (threadIds.length > 0) {
+    const { data: latestMsgs } = await supabase
+      .from("messages")
+      .select("thread_id, created_at")
+      .in("thread_id", threadIds)
+      .eq("sender_role", "contact")
+      .order("created_at", { ascending: false });
+
+    if (latestMsgs) {
+      for (const msg of latestMsgs) {
+        if (!lastMessageAtMap[msg.thread_id]) {
+          lastMessageAtMap[msg.thread_id] = msg.created_at;
+        }
+      }
+    }
+  }
+
+  const threadsWithUnread = threads.map((t) => ({
+    ...t,
+    lastMessageAt: lastMessageAtMap[t.id] ?? null,
+  }));
 
   const currentThread = params.thread
     ? await getThreadForUser({
@@ -142,7 +168,7 @@ export default async function ChatPage({
                   id: c.id,
                   name: c.name,
                 }))}
-                threads={threads}
+                threads={threadsWithUnread}
                 currentThreadId={currentThread?.id}
                 availableCharacters={availableCharactersToAdd}
               />
@@ -220,51 +246,10 @@ export default async function ChatPage({
                   No conversations yet.
                 </div>
               ) : (
-                threads.map((thread) => {
-                  const isActive = currentThread?.id === thread.id;
-
-                  return (
-                    <Link
-                      key={thread.id}
-                      href={`/chat?thread=${thread.id}`}
-                      className="block"
-                    >
-                      <div
-                        className={`relative flex items-center gap-3 px-3 py-2.5 transition-all ${
-                          isActive ? "bg-white" : "hover:bg-white/[0.05]"
-                        }`}
-                      >
-                        <div className="relative shrink-0">
-                          <Avatar
-                            src={thread.contact?.avatar}
-                            name={thread.contact?.name ?? "?"}
-                            size={36}
-                          />
-                          {!isActive && (
-                            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-[#23252f]" />
-                          )}
-                        </div>
-
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className={`truncate text-sm font-semibold ${
-                              isActive ? "text-[#23252f]" : "text-white/80"
-                            }`}
-                          >
-                            {thread.contact?.name ?? "Unknown"}
-                          </div>
-                          <div
-                            className={`truncate text-[11px] ${
-                              isActive ? "text-[#23252f]/50" : "text-white/35"
-                            }`}
-                          >
-                            {thread.contact?.title ?? thread.contact?.key ?? ""}
-                          </div>
-                        </div>
-                      </div>
-                    </Link>
-                  );
-                })
+                <ThreadList
+                  threads={threadsWithUnread}
+                  currentThreadId={currentThread?.id}
+                />
               )}
             </div>
 

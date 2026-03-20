@@ -5,32 +5,40 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export type GameEventRow = {
   id: string;
   title: string;
-  slug: string | null;
-  summary: string;
-  details: string | null;
-  region: string | null;
-  faction: string | null;
+  slug: string;
+  order: number;
   importance: number;
-  status: "upcoming" | "active" | "ended";
-  affected_character_keys: string[];
-  starts_at: string | null;
-  ends_at: string | null;
-  created_at: string;
-  updated_at: string;
+  details: string | null;
+  involved_characters: string[] | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
-function splitLines(value: string) {
+function getString(formData: FormData, key: string) {
+  return String(formData.get(key) ?? "").trim();
+}
+
+function getNullableString(formData: FormData, key: string) {
+  const value = getString(formData, key);
+  return value || null;
+}
+
+function getNumber(formData: FormData, key: string, fallback = 0) {
+  const value = Number(getString(formData, key));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function textareaToArray(value: string) {
   return value
     .split("\n")
-    .map((x) => x.trim())
+    .map((line) => line.trim())
     .filter(Boolean);
 }
 
-function slugify(input: string) {
-  return input
+function slugify(value: string) {
+  return value
     .toLowerCase()
     .trim()
-    .replace(/['"]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
@@ -41,9 +49,8 @@ export async function listEvents(): Promise<GameEventRow[]> {
   const { data, error } = await supabase
     .from("game_events")
     .select("*")
-    .order("status", { ascending: true })
-    .order("importance", { ascending: false })
-    .order("starts_at", { ascending: false, nullsFirst: false });
+    .order("order", { ascending: true })
+    .order("created_at", { ascending: false });
 
   if (error) throw new Error(error.message);
 
@@ -65,81 +72,69 @@ export async function getEventById(id: string): Promise<GameEventRow | null> {
 }
 
 export async function createEvent(formData: FormData) {
-  "use server";
-
-  const title = String(formData.get("title") ?? "").trim();
-  const summary = String(formData.get("summary") ?? "").trim();
-
-  if (!title || !summary) {
-    throw new Error("Title and summary are required.");
-  }
-
   const supabase = createAdminClient();
 
-  const { error } = await supabase.from("game_events").insert({
-    title,
-    slug: slugify(String(formData.get("slug") ?? "").trim() || title),
-    summary,
-    details: String(formData.get("details") ?? "").trim() || null,
-    region: String(formData.get("region") ?? "").trim() || null,
-    faction: String(formData.get("faction") ?? "").trim() || null,
-    importance: Number(formData.get("importance") ?? 1),
-    status: String(formData.get("status") ?? "active").trim() || "active",
-    affected_character_keys: splitLines(
-      String(formData.get("affected_character_keys") ?? "")
-    ),
-    starts_at: String(formData.get("starts_at") ?? "").trim() || null,
-    ends_at: String(formData.get("ends_at") ?? "").trim() || null,
-  });
+  const title = getString(formData, "title");
+  const slugInput = getString(formData, "slug");
+  const slug = slugInput || slugify(title);
 
+  if (!title) throw new Error("Title is required.");
+  if (!slug) throw new Error("Slug is required.");
+
+  const payload = {
+    title,
+    slug,
+    order: getNumber(formData, "order", 0),
+    importance: getNumber(formData, "importance", 1),
+    details: getNullableString(formData, "details"),
+    involved_characters: textareaToArray(
+      getString(formData, "involved_characters")
+    ),
+  };
+
+  const { error } = await supabase.from("game_events").insert(payload);
   if (error) throw new Error(error.message);
 }
 
 export async function updateEvent(formData: FormData) {
-  "use server";
-
-  const id = String(formData.get("id") ?? "").trim();
-  const title = String(formData.get("title") ?? "").trim();
-  const summary = String(formData.get("summary") ?? "").trim();
-
-  if (!id || !title || !summary) {
-    throw new Error("Missing id, title, or summary.");
-  }
-
   const supabase = createAdminClient();
+
+  const id = getString(formData, "id");
+  if (!id) throw new Error("Missing event id.");
+
+  const title = getString(formData, "title");
+  const slugInput = getString(formData, "slug");
+  const slug = slugInput || slugify(title);
+
+  if (!title) throw new Error("Title is required.");
+  if (!slug) throw new Error("Slug is required.");
+
+  const payload = {
+    title,
+    slug,
+    order: getNumber(formData, "order", 0),
+    importance: getNumber(formData, "importance", 1),
+    details: getNullableString(formData, "details"),
+    involved_characters: textareaToArray(
+      getString(formData, "involved_characters")
+    ),
+    updated_at: new Date().toISOString(),
+  };
 
   const { error } = await supabase
     .from("game_events")
-    .update({
-      title,
-      slug: slugify(String(formData.get("slug") ?? "").trim() || title),
-      summary,
-      details: String(formData.get("details") ?? "").trim() || null,
-      region: String(formData.get("region") ?? "").trim() || null,
-      faction: String(formData.get("faction") ?? "").trim() || null,
-      importance: Number(formData.get("importance") ?? 1),
-      status: String(formData.get("status") ?? "active").trim() || "active",
-      affected_character_keys: splitLines(
-        String(formData.get("affected_character_keys") ?? "")
-      ),
-      starts_at: String(formData.get("starts_at") ?? "").trim() || null,
-      ends_at: String(formData.get("ends_at") ?? "").trim() || null,
-      updated_at: new Date().toISOString(),
-    })
+    .update(payload)
     .eq("id", id);
 
   if (error) throw new Error(error.message);
 }
 
 export async function deleteEvent(formData: FormData) {
-  "use server";
-
-  const id = String(formData.get("id") ?? "").trim();
-  if (!id) throw new Error("Missing event id.");
-
   const supabase = createAdminClient();
 
-  const { error } = await supabase.from("game_events").delete().eq("id", id);
+  const id = getString(formData, "id");
+  if (!id) throw new Error("Missing event id.");
 
+  const { error } = await supabase.from("game_events").delete().eq("id", id);
   if (error) throw new Error(error.message);
 }

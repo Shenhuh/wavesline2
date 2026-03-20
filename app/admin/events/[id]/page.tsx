@@ -62,17 +62,14 @@ export default async function AdminEditEventPage({
 
           <div>
             <label className="mb-2 block text-sm font-semibold text-[#2a313d]">
-              Status
+              Order
             </label>
-            <select
-              name="status"
-              defaultValue={event.status}
+            <input
+              name="order"
+              type="number"
+              defaultValue={event.order ?? 0}
               className="w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
-            >
-              <option value="upcoming">upcoming</option>
-              <option value="active">active</option>
-              <option value="ended">ended</option>
-            </select>
+            />
           </div>
 
           <div>
@@ -84,68 +81,10 @@ export default async function AdminEditEventPage({
               type="number"
               min={1}
               max={10}
-              defaultValue={event.importance}
+              defaultValue={event.importance ?? 1}
               className="w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
             />
           </div>
-
-          <div>
-            <label className="mb-2 block text-sm font-semibold text-[#2a313d]">
-              Region
-            </label>
-            <input
-              name="region"
-              defaultValue={event.region ?? ""}
-              className="w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-2 block text-sm font-semibold text-[#2a313d]">
-              Faction
-            </label>
-            <input
-              name="faction"
-              defaultValue={event.faction ?? ""}
-              className="w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-2 block text-sm font-semibold text-[#2a313d]">
-              Starts At
-            </label>
-            <input
-              name="starts_at"
-              type="datetime-local"
-              defaultValue={event.starts_at ? event.starts_at.slice(0, 16) : ""}
-              className="w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-2 block text-sm font-semibold text-[#2a313d]">
-              Ends At
-            </label>
-            <input
-              name="ends_at"
-              type="datetime-local"
-              defaultValue={event.ends_at ? event.ends_at.slice(0, 16) : ""}
-              className="w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="mb-2 block text-sm font-semibold text-[#2a313d]">
-            Summary
-          </label>
-          <textarea
-            name="summary"
-            required
-            defaultValue={event.summary}
-            className="min-h-[120px] w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
-          />
         </div>
 
         <div>
@@ -155,20 +94,20 @@ export default async function AdminEditEventPage({
           <textarea
             name="details"
             defaultValue={event.details ?? ""}
-            className="min-h-[140px] w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
+            className="min-h-[180px] w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
           />
         </div>
 
         <div>
           <label className="mb-2 block text-sm font-semibold text-[#2a313d]">
-            Affected Character Keys
+            Involved Characters
           </label>
           <p className="mb-2 text-xs text-[#677388]">
             One character key per line.
           </p>
           <textarea
-            name="affected_character_keys"
-            defaultValue={(event.affected_character_keys ?? []).join("\n")}
+            name="involved_characters"
+            defaultValue={(event.involved_characters ?? []).join("\n")}
             className="min-h-[120px] w-full rounded-xl border border-black/10 px-4 py-3 outline-none"
           />
         </div>

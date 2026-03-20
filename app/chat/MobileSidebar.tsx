@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import AddContactModal from "./AddContactModal";
+import ThreadList from "./ThreadList";
 
 type ThreadItem = {
   id: string;
   contact_character_id: string;
+  lastMessageAt?: string | null;
   contact?: {
     id: string;
     name: string;
@@ -184,43 +186,7 @@ export default function MobileSidebar({
                   No conversations yet.
                 </div>
               ) : (
-                threads.map((thread) => {
-                  const isActive = currentThreadId === thread.id;
-
-                  return (
-                    <Link
-                      key={thread.id}
-                      href={`/chat?thread=${thread.id}`}
-                      onClick={() => setOpen(false)}
-                      className="block"
-                    >
-                      <div
-                        className={`flex items-center gap-3 px-4 py-3 ${
-                          isActive ? "bg-white text-[#23252f]" : "text-white/80"
-                        }`}
-                      >
-                        <Avatar
-                          src={thread.contact?.avatar}
-                          name={thread.contact?.name ?? "Unknown"}
-                          size={36}
-                        />
-
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-semibold">
-                            {thread.contact?.name ?? "Unknown"}
-                          </div>
-                          <div
-                            className={`truncate text-[11px] ${
-                              isActive ? "text-[#23252f]/55" : "text-white/35"
-                            }`}
-                          >
-                            {thread.contact?.title ?? thread.contact?.key ?? ""}
-                          </div>
-                        </div>
-                      </div>
-                    </Link>
-                  );
-                })
+                <ThreadList threads={threads} currentThreadId={currentThreadId} />
               )}
             </div>
 

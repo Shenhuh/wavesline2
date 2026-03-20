@@ -44,6 +44,16 @@ function cleanTextBlock(text?: string | null) {
   return (text ?? "").trim();
 }
 
+const VISUALIZATION_TRIGGERS = [
+  "visualize", "visualise", "diagram", "draw me", "draw a",
+  "chart", "graph", "show me a", "plot", "sketch",
+];
+
+export function isVisualizationRequest(message: string): boolean {
+  const lower = message.toLowerCase();
+  return VISUALIZATION_TRIGGERS.some((t) => lower.includes(t));
+}
+
 function getRelationshipModifiers(
   relationship: RelationshipState
 ): RelationshipModifiers {
@@ -103,9 +113,7 @@ function getRelationshipModifiers(
 
   return {
     toneModifier: toneBits.length ? toneBits.join(", ") : "default",
-    behaviorModifier: behaviorBits.length
-      ? behaviorBits.join("; ")
-      : "default",
+    behaviorModifier: behaviorBits.length ? behaviorBits.join("; ") : "default",
     styleModifier: styleBits.length ? styleBits.join("; ") : "default",
   };
 }
@@ -147,7 +155,19 @@ function buildExtendedCharacterContextBlock(
   return sections.join("\n\n");
 }
 
-export function chooseModelSettings(plan: ReplyPlan): OrchestratorModelSettings {
+export function chooseModelSettings(
+  plan: ReplyPlan,
+  isViz: boolean = false
+): OrchestratorModelSettings {
+  // Visualization requests need much more tokens for SVG output
+  if (isViz) {
+    return {
+      temperature: 0.4,
+      maxTokens: 1800,
+      topP: 0.9,
+    };
+  }
+
   let temperature = 0.68;
   let topP = 0.9;
 
@@ -234,10 +254,11 @@ export function createReplyPlannerPrompt(args: {
     profile: character,
   });
 
+  const isViz = isVisualizationRequest(message);
+
   const memorySummary = buildLightMemorySummary(history, runtimeMemory);
   const relationshipInfluence = buildRelationshipInfluenceBlock(relationship);
-  const characterContextBlock =
-    buildExtendedCharacterContextBlock(extraCharacterContext);
+  const characterContextBlock = buildExtendedCharacterContextBlock(extraCharacterContext);
 
   const mergedWorldContext = [
     cleanTextBlock(worldContext),
@@ -257,7 +278,7 @@ export function createReplyPlannerPrompt(args: {
     history,
   });
 
-  const modelSettings = chooseModelSettings(plan);
+  const modelSettings = chooseModelSettings(plan, isViz);
 
   return {
     plan,
@@ -277,6 +298,10 @@ export function isWeakCharacterReply(replyRaw: string): boolean {
 
   if (!reply) return true;
   if (reply.length < 18) return true;
+
+  // Don't flag visualization responses as weak — they're intentionally long
+  if (reply.includes("<visualization>") || reply.includes("<svg")) return false;
+
   if (reply.length > 650) return true;
 
   const bannedPatterns = [
@@ -294,63 +319,31 @@ export function isWeakCharacterReply(replyRaw: string): boolean {
     "reply plan",
   ];
 
-  if (bannedPatterns.some((pattern) => lower.includes(pattern))) {
-    return true;
-  }
+  if (bannedPatterns.some((pattern) => lower.includes(pattern))) return true;
 
   const stageDirectionPatterns = [
-    "*",
-    "i tilt my head",
-    "tilt my head slightly",
-    "i step closer",
-    "leans closer",
-    "i watch you",
-    "i study you",
-    "studying you",
-    "a slow smile",
-    "smile curls",
-    "my lips",
-    "my eyes",
-    "my gaze",
-    "my expression",
-    "my smile",
-    "crosses my features",
-    "the dim light",
-    "the room",
-    "between us",
-    "the silence between us",
-    "silence settles",
-    "hangs in the air",
-    "fills the space",
-    "in the air",
-    "sit with it",
-    "let it settle",
-    "settle in the air",
+    "*", "i tilt my head", "tilt my head slightly", "i step closer",
+    "leans closer", "i watch you", "i study you", "studying you",
+    "a slow smile", "smile curls", "my lips", "my eyes", "my gaze",
+    "my expression", "my smile", "crosses my features", "the dim light",
+    "the room", "between us", "the silence between us", "silence settles",
+    "hangs in the air", "fills the space", "in the air", "sit with it",
+    "let it settle", "settle in the air",
   ];
 
-  if (stageDirectionPatterns.some((pattern) => lower.includes(pattern))) {
-    return true;
-  }
+  if (stageDirectionPatterns.some((pattern) => lower.includes(pattern))) return true;
 
   const therapistPatterns = [
-    "that kind of sadness",
-    "doesn't always need a reason",
-    "it doesn't have to",
-    "would you rather",
-    "would it help to talk",
-    "what brought it to the surface",
-    "you don't have to explain it",
+    "that kind of sadness", "doesn't always need a reason",
+    "it doesn't have to", "would you rather", "would it help to talk",
+    "what brought it to the surface", "you don't have to explain it",
   ];
 
-  if (therapistPatterns.some((p) => lower.includes(p))) {
-    return true;
-  }
+  if (therapistPatterns.some((p) => lower.includes(p))) return true;
 
   const badStarts = ["sometimes", "it can be", "it's normal", "sadness", "the feeling"];
 
-  if (badStarts.some((s) => lower.startsWith(s))) {
-    return true;
-  }
+  if (badStarts.some((s) => lower.startsWith(s))) return true;
 
   return false;
 }

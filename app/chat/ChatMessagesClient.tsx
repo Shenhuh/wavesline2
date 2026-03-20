@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import ChatInput from "./ChatInput";
-import MessageBubble from "./MessageBubble";
+import MessageBubble, { TypingIndicator } from "./MessageBubble";
 import type { StickerOption } from "./StickerPicker";
 
 export type ClientMessage = {
@@ -32,6 +32,15 @@ type ChatMessagesClientProps = {
   blockMessage?: string | null;
 };
 
+// Fires regardless of component mount state — called OUTSIDE setState callbacks
+function fireNewMessage(threadId: string, createdAt: string) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("wavesline:newmessage", { detail: { threadId, createdAt } })
+    );
+  }
+}
+
 export default function ChatMessagesClient({
   threadId, activeCharacterName, activeCharacterAvatar = null,
   contactCharacterName, contactCharacterKey = null,
@@ -40,12 +49,13 @@ export default function ChatMessagesClient({
   stickers = [], initialMessages, blocked = false, blockMessage = null,
 }: ChatMessagesClientProps) {
   const [optimisticMessages, setOptimisticMessages] = useState<ClientMessage[]>(initialMessages);
+  const [isTyping, setIsTyping] = useState(false);
   const visibleMessages = useMemo(() => optimisticMessages, [optimisticMessages]);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [visibleMessages]);
+  }, [visibleMessages, isTyping]);
 
   function appendOptimisticUserMessage(content: string) {
     setOptimisticMessages((prev) => [...prev, {
@@ -53,6 +63,7 @@ export default function ChatMessagesClient({
       sender_role: "active", content, created_at: new Date().toISOString(),
       message_type: "text", sticker_id: null, sticker: null,
     }]);
+    setIsTyping(true);
   }
 
   function appendOptimisticStickerMessage(sticker: StickerOption) {
@@ -62,10 +73,22 @@ export default function ChatMessagesClient({
       message_type: "sticker", sticker_id: sticker.id,
       sticker: { id: sticker.id, key: sticker.key, label: sticker.label, image_path: sticker.image_path },
     }]);
+    setIsTyping(true);
   }
 
-  function replaceAfterServer(args: { savedUserMessage: ClientMessage; replyMessage?: ClientMessage; stickerReplyMessage?: ClientMessage | null; optimisticContent?: string }) {
+  function replaceAfterServer(args: {
+    savedUserMessage: ClientMessage;
+    replyMessage?: ClientMessage;
+    stickerReplyMessage?: ClientMessage | null;
+    optimisticContent?: string;
+  }) {
     const { savedUserMessage, replyMessage, stickerReplyMessage, optimisticContent } = args;
+
+    // Fire events BEFORE setState — these must run even if component unmounts
+    if (replyMessage) fireNewMessage(threadId, replyMessage.created_at);
+    if (stickerReplyMessage) fireNewMessage(threadId, stickerReplyMessage.created_at);
+
+    setIsTyping(false);
     setOptimisticMessages((prev) => {
       let next = optimisticContent
         ? prev.filter((m) => !(m.id.startsWith("optimistic-user-") && m.sender_role === "active" && m.content === optimisticContent))
@@ -78,6 +101,7 @@ export default function ChatMessagesClient({
   }
 
   function replaceStickerAfterServer(savedMessage: ClientMessage, stickerId: string) {
+    setIsTyping(false);
     setOptimisticMessages((prev) => [
       ...prev.filter((m) => !(m.id.startsWith("optimistic-sticker-") && m.sender_role === "active" && m.sticker_id === stickerId)),
       savedMessage,
@@ -85,10 +109,12 @@ export default function ChatMessagesClient({
   }
 
   function rollbackOptimistic(content: string) {
+    setIsTyping(false);
     setOptimisticMessages((prev) => prev.filter((m) => !(m.id.startsWith("optimistic-user-") && m.sender_role === "active" && m.content === content)));
   }
 
   function rollbackOptimisticSticker(stickerId: string) {
+    setIsTyping(false);
     setOptimisticMessages((prev) => prev.filter((m) => !(m.id.startsWith("optimistic-sticker-") && m.sender_role === "active" && m.sticker_id === stickerId)));
   }
 
@@ -96,20 +122,24 @@ export default function ChatMessagesClient({
 
   return (
     <>
-      <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 sm:py-5" style={{ background: "#e9eaee" }}>
-        <div className="mb-4 flex items-center justify-center gap-1.5">
-          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" className="shrink-0">
-            <path d="M5.5 1L6.8 4H10L7.3 6L8.3 9L5.5 7.3L2.7 9L3.7 6L1 4H4.2L5.5 1Z" stroke="#23252f" strokeWidth="1" strokeOpacity="0.3" fill="none"/>
+      <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-4 sm:py-5" style={{ background: "#eae7e1" }}>
+        <div className="mb-5 flex items-center justify-center gap-1.5">
+          <svg width="10" height="10" viewBox="0 0 11 11" fill="none" className="shrink-0">
+            <path d="M5.5 1L6.8 4H10L7.3 6L8.3 9L5.5 7.3L2.7 9L3.7 6L1 4H4.2L5.5 1Z"
+              stroke="#23252f" strokeWidth="1" strokeOpacity="0.25" fill="none" />
           </svg>
-          <span className="text-[11px] text-[#23252f]/35">You are now friends with {contactCharacterName}</span>
+          <span style={{ fontSize: 10.5, color: "rgba(35,37,47,0.3)", letterSpacing: "0.02em" }}>
+            You are now friends with {contactCharacterName}
+          </span>
         </div>
 
-        {visibleMessages.length === 0 ? (
-          <div className="rounded px-4 py-3 text-sm text-[#23252f]/40" style={{ background: "rgba(255,255,255,0.6)", border: "1px dashed rgba(0,0,0,0.1)" }}>
-            No messages yet.
+        {visibleMessages.length === 0 && !isTyping ? (
+          <div className="rounded-xl px-4 py-3 text-center"
+            style={{ fontSize: 12, color: "rgba(35,37,47,0.35)", background: "rgba(255,255,255,0.55)", border: "1px dashed rgba(0,0,0,0.09)" }}>
+            No messages yet. Say hello!
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             {visibleMessages.map((message) => (
               <MessageBubble
                 key={message.id}
@@ -125,15 +155,25 @@ export default function ChatMessagesClient({
                 isLatestContactMessage={message.id === latestContactMessageId}
               />
             ))}
+            {isTyping && (
+              <TypingIndicator
+                contactCharacterName={contactCharacterName}
+                contactAvatar={contactAvatar}
+              />
+            )}
             <div ref={bottomRef} />
           </div>
         )}
       </div>
+
       <ChatInput
         threadId={threadId} blocked={blocked} blockMessage={blockMessage} stickers={stickers}
-        onOptimisticSend={appendOptimisticUserMessage} onOptimisticStickerSend={appendOptimisticStickerMessage}
-        onServerCommit={replaceAfterServer} onStickerServerCommit={replaceStickerAfterServer}
-        onSendError={rollbackOptimistic} onStickerSendError={rollbackOptimisticSticker}
+        onOptimisticSend={appendOptimisticUserMessage}
+        onOptimisticStickerSend={appendOptimisticStickerMessage}
+        onServerCommit={replaceAfterServer}
+        onStickerServerCommit={replaceStickerAfterServer}
+        onSendError={rollbackOptimistic}
+        onStickerSendError={rollbackOptimisticSticker}
       />
     </>
   );

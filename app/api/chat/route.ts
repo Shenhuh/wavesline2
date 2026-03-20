@@ -233,6 +233,14 @@ function buildWorldContext(args: {
   pieces.push(
     "When answering about monsters, you must stay consistent with the same entity and not switch to another."
   );
+  pieces.push(
+    "If the user explicitly asks you to visualize, diagram, chart, show, or draw something, " +
+    "output a visualization using this exact format: " +
+    "<visualization><svg width=\"100%\" viewBox=\"0 0 680 300\" xmlns=\"http://www.w3.org/2000/svg\">...</svg></visualization>. " +
+    "The SVG must be self-contained with hardcoded colors (e.g. fill=\"#3b82f6\"), readable font sizes (minimum 12px), " +
+    "and no external dependencies. Place the <visualization> block on its own line in your reply. " +
+    "Only use <visualization> when the user explicitly asks for it — never in normal conversation replies."
+  );
 
   if (contactCharacter.title) {
     pieces.push(`${contactCharacter.name}'s title: ${contactCharacter.title}.`);
@@ -862,7 +870,6 @@ export async function POST(req: Request) {
         contactCharacter: contactCharacter.name,
         events: events.map((e) => ({
           title: e.title,
-          status: e.status,
           importance: e.importance,
         })),
         monsters: monsters.map((m) => ({

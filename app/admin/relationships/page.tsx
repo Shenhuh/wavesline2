@@ -57,11 +57,7 @@ export default async function AdminRelationshipsPage() {
           <p style={{ fontSize: 13, color: "rgba(35,37,47,0.5)", margin: "4px 0 0" }}>Manage how characters relate to each other.</p>
         </div>
         <Link href="/admin/relationships/new" style={{ display: "inline-flex", alignItems: "center", gap: 8, borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, color: "#ffffff", background: "#23252f", textDecoration: "none" }}>
-          <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-            <line x1="6.5" y1="1" x2="6.5" y2="12" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
-            <line x1="1" y1="6.5" x2="12" y2="6.5" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-          New Relationship
+          Relationship Map
         </Link>
       </div>
 
@@ -138,7 +134,7 @@ export default async function AdminRelationshipsPage() {
                   <span style={{ fontSize: 11, color: "rgba(35,37,47,0.35)" }}>
                     {new Date(rel.updated_at).toLocaleDateString()}
                   </span>
-                  <Link href={`/admin/relationships/${rel.id}`} style={{
+                  {/* <Link href={`/admin/relationships/${rel.id}`} style={{
                     display: "inline-flex", alignItems: "center", gap: 4,
                     fontSize: 12, fontWeight: 600, color: "#23252f",
                     textDecoration: "none", borderRadius: 7,
@@ -148,7 +144,7 @@ export default async function AdminRelationshipsPage() {
                     <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
                       <path d="M2 5h6M5 2l3 3-3 3" stroke="#23252f" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
-                  </Link>
+                  </Link> */}
                 </div>
               </div>
             );

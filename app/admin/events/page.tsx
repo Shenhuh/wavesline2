@@ -34,18 +34,12 @@ export default async function AdminEventsPage() {
                 <th className="px-4 py-3 text-sm font-semibold text-[#2a313d]">
                   Title
                 </th>
-                <th className="px-4 py-3 text-sm font-semibold text-[#2a313d]">
-                  Status
-                </th>
+          
                 <th className="px-4 py-3 text-sm font-semibold text-[#2a313d]">
                   Importance
                 </th>
-                <th className="px-4 py-3 text-sm font-semibold text-[#2a313d]">
-                  Region
-                </th>
-                <th className="px-4 py-3 text-sm font-semibold text-[#2a313d]">
-                  Faction
-                </th>
+          
+       
                 <th className="px-4 py-3 text-sm font-semibold text-[#2a313d]">
                   Affected
                 </th>
@@ -58,21 +52,12 @@ export default async function AdminEventsPage() {
               {events.map((event) => (
                 <tr key={event.id} className="border-t border-black/10">
                   <td className="px-4 py-3 text-[#2a313d]">{event.title}</td>
-                  <td className="px-4 py-3 text-[#677388]">{event.status}</td>
+                  
                   <td className="px-4 py-3 text-[#677388]">
                     {event.importance}
                   </td>
-                  <td className="px-4 py-3 text-[#677388]">
-                    {event.region ?? "—"}
-                  </td>
-                  <td className="px-4 py-3 text-[#677388]">
-                    {event.faction ?? "—"}
-                  </td>
-                  <td className="px-4 py-3 text-[#677388]">
-                    {event.affected_character_keys?.length
-                      ? event.affected_character_keys.join(", ")
-                      : "Global"}
-                  </td>
+                  
+             
                   <td className="px-4 py-3">
                     <Link
                       href={`/admin/events/${event.id}`}
