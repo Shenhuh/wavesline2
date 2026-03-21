@@ -136,6 +136,7 @@ export async function createCharacterAction(formData: FormData) {
       sticker_mood_influence: Number.isFinite(stickerMoodInfluence)
         ? stickerMoodInfluence
         : 0.12,
+      forms: null,
     })
     .select("id")
     .single();
@@ -185,6 +186,15 @@ export async function updateCharacterAction(
   );
 
   const avatarFile = formData.get("avatarFile") as File | null;
+  const formsJson = String(formData.get("formsJson") ?? "").trim();
+  let forms: Array<{ display_name: string; avatar: string; mood_triggers: string[] }> | null = null;
+  if (formsJson) {
+    try {
+      forms = JSON.parse(formsJson);
+    } catch {
+      forms = null;
+    }
+  }
 
   if (!key || !name) {
     throw new Error("Character key and name are required.");
@@ -245,6 +255,7 @@ export async function updateCharacterAction(
       sticker_mood_influence: Number.isFinite(stickerMoodInfluence)
         ? stickerMoodInfluence
         : 0.12,
+      forms: forms,
     })
     .eq("id", characterId);
 

@@ -14,6 +14,8 @@ export type ClientMessage = {
   message_type: "text" | "sticker";
   sticker_id: string | null;
   sticker: { id: string; key: string; label: string; image_path: string } | null;
+  resolvedName?: string | null;
+  resolvedAvatar?: string | null;
 };
 
 type ChatMessagesClientProps = {
@@ -81,8 +83,18 @@ export default function ChatMessagesClient({
     replyMessage?: ClientMessage;
     stickerReplyMessage?: ClientMessage | null;
     optimisticContent?: string;
+    resolvedName?: string | null;
+    resolvedAvatar?: string | null;
   }) {
-    const { savedUserMessage, replyMessage, stickerReplyMessage, optimisticContent } = args;
+    const { savedUserMessage, replyMessage, stickerReplyMessage, optimisticContent, resolvedName, resolvedAvatar } = args;
+
+    // Stamp resolved form onto reply messages only
+    const stampedReply = replyMessage
+      ? { ...replyMessage, resolvedName: resolvedName ?? null, resolvedAvatar: resolvedAvatar ?? null }
+      : undefined;
+    const stampedSticker = stickerReplyMessage
+      ? { ...stickerReplyMessage, resolvedName: resolvedName ?? null, resolvedAvatar: resolvedAvatar ?? null }
+      : null;
 
     // Fire events BEFORE setState — these must run even if component unmounts
     if (replyMessage) fireNewMessage(threadId, replyMessage.created_at);
@@ -94,8 +106,8 @@ export default function ChatMessagesClient({
         ? prev.filter((m) => !(m.id.startsWith("optimistic-user-") && m.sender_role === "active" && m.content === optimisticContent))
         : prev;
       next = [...next, savedUserMessage];
-      if (replyMessage) next.push(replyMessage);
-      if (stickerReplyMessage) next.push(stickerReplyMessage);
+      if (stampedReply) next.push(stampedReply);
+      if (stampedSticker) next.push(stampedSticker);
       return next;
     });
   }
@@ -146,12 +158,12 @@ export default function ChatMessagesClient({
                 message={message}
                 activeCharacterName={activeCharacterName}
                 activeCharacterAvatar={activeCharacterAvatar}
-                contactCharacterName={contactCharacterName}
+                contactCharacterName={message.resolvedName ?? contactCharacterName}
                 contactCharacterKey={contactCharacterKey}
                 contactVoiceOnly={contactVoiceOnly}
                 contactAutoPlayVoice={contactAutoPlayVoice}
                 contactPreferredVoice={contactPreferredVoice}
-                contactAvatar={contactAvatar}
+                contactAvatar={message.resolvedAvatar ?? contactAvatar}
                 isLatestContactMessage={message.id === latestContactMessageId}
               />
             ))}

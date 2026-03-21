@@ -1,5 +1,8 @@
 // app/admin/characters/CharacterForm.tsx
 
+"use client";
+
+import React from "react";
 import type { AdminCharacterRow } from "@/lib/admin/characters";
 
 export default function CharacterForm({
@@ -9,6 +12,9 @@ export default function CharacterForm({
   character?: AdminCharacterRow | null;
   submitLabel: string;
 }) {
+  const [forms, setForms] = React.useState<Array<{ display_name: string; avatar: string; trigger_type: "mood" | "random"; mood_triggers: string[]; chance: number }>>(
+    Array.isArray((character as any)?.forms) ? (character as any).forms : []
+  );
   return (
     <div className="space-y-6">
 
@@ -100,6 +106,34 @@ export default function CharacterForm({
         </div>
       </Section>
 
+      {/* Section: Forms */}
+      <Section title="Forms (Mood-based appearance)">
+        <p className="text-xs text-[#23252f]/40 mb-3">
+          Define alternate avatars and display names that activate based on the character&apos;s current mood. Leave empty if this character has no forms.
+        </p>
+        <input type="hidden" name="formsJson" value={JSON.stringify(forms)} />
+        <div className="space-y-3">
+          {forms.map((form, i) => (
+            <FormEntry
+              key={i}
+              index={i}
+              form={form}
+              characterKey={character?.key ?? "character"}
+              onChange={(patch) => setForms((prev) => prev.map((f, j) => j === i ? { ...f, ...patch } : f))}
+              onRemove={() => setForms((prev) => prev.filter((_, j) => j !== i))}
+            />
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => setForms((prev) => [...prev, { display_name: "", avatar: "", trigger_type: "mood", mood_triggers: [], chance: 0.1 }])}
+          className="mt-3 text-sm font-semibold text-[#23252f]/60 hover:text-[#23252f] transition-colors"
+          style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+        >
+          + Add Form
+        </button>
+      </Section>
+
       {/* Submit */}
       <button
         type="submit"
@@ -116,6 +150,157 @@ export default function CharacterForm({
       >
         {submitLabel}
       </button>
+    </div>
+  );
+}
+
+function FormEntry({
+  index,
+  form,
+  characterKey,
+  onChange,
+  onRemove,
+}: {
+  index: number;
+  form: { display_name: string; avatar: string; trigger_type: "mood" | "random"; mood_triggers: string[]; chance: number };
+  characterKey: string;
+  onChange: (patch: Partial<{ display_name: string; avatar: string; trigger_type: "mood" | "random"; mood_triggers: string[]; chance: number }>) => void;
+  onRemove: () => void;
+}) {
+  const [uploading, setUploading] = React.useState(false);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("characterKey", characterKey);
+      const res = await fetch("/api/admin/upload-avatar", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok || !data.url) throw new Error(data.error || "Upload failed");
+      onChange({ avatar: data.url });
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl p-4 space-y-3" style={{ background: "#f6f7f9", border: "1px solid rgba(0,0,0,0.08)" }}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-[#23252f]/50 uppercase tracking-wide">Form {index + 1}</span>
+        <button type="button" onClick={onRemove} className="text-xs text-red-400 hover:text-red-600 font-medium">
+          Remove
+        </button>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="mb-1.5 block text-xs font-semibold text-[#23252f]/60 uppercase tracking-wide">Display Name</label>
+          <input
+            type="text"
+            value={form.display_name}
+            onChange={(e) => onChange({ display_name: e.target.value })}
+            placeholder="e.g. ???"
+            className="w-full rounded-lg px-3.5 py-2.5 text-sm text-[#23252f] outline-none"
+            style={{ background: "white", border: "1px solid rgba(0,0,0,0.09)" }}
+          />
+        </div>
+
+        <div>
+          <label className="mb-1.5 block text-xs font-semibold text-[#23252f]/60 uppercase tracking-wide">Avatar</label>
+          {form.avatar ? (
+            <div className="flex items-center gap-3 rounded-xl p-3" style={{ background: "white", border: "1px solid rgba(0,0,0,0.09)" }}>
+              <img src={form.avatar} alt={form.display_name} className="h-10 w-10 rounded-full object-cover shrink-0" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs text-[#23252f]/40">{form.avatar}</div>
+                <button
+                  type="button"
+                  onClick={() => onChange({ avatar: "" })}
+                  className="mt-1 text-xs text-red-400 hover:text-red-600"
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/jpg"
+                disabled={uploading}
+                onChange={handleFileChange}
+                className="w-full rounded-xl px-4 py-3 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-[#23252f] file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-white"
+                style={{ background: "white", border: "1px solid rgba(0,0,0,0.09)" }}
+              />
+              {uploading && <p className="mt-1 text-xs text-[#23252f]/40">Uploading…</p>}
+              {uploadError && <p className="mt-1 text-xs text-red-400">{uploadError}</p>}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <label className="mb-1.5 block text-xs font-semibold text-[#23252f]/60 uppercase tracking-wide">Trigger Type</label>
+        <div className="flex gap-2">
+          {(["mood", "random"] as const).map((type) => (
+            <button
+              key={type}
+              type="button"
+              onClick={() => onChange({ trigger_type: type })}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-colors"
+              style={{
+                background: form.trigger_type === type ? "#23252f" : "white",
+                color: form.trigger_type === type ? "white" : "rgba(35,37,47,0.5)",
+                border: "1px solid rgba(0,0,0,0.09)",
+              }}
+            >
+              {type}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {form.trigger_type === "mood" ? (
+        <div>
+          <label className="mb-1.5 block text-xs font-semibold text-[#23252f]/60 uppercase tracking-wide">
+            Mood Triggers <span className="text-[#23252f]/30 normal-case font-normal">(comma separated)</span>
+          </label>
+          <input
+            type="text"
+            value={(form.mood_triggers ?? []).join(", ")}
+            onChange={(e) => onChange({ mood_triggers: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
+            placeholder="e.g. hostile, enraged, dark"
+            className="w-full rounded-lg px-3.5 py-2.5 text-sm text-[#23252f] outline-none"
+            style={{ background: "white", border: "1px solid rgba(0,0,0,0.09)" }}
+          />
+        </div>
+      ) : (
+        <div>
+          <label className="mb-1.5 block text-xs font-semibold text-[#23252f]/60 uppercase tracking-wide">
+            Chance per message <span className="text-[#23252f]/30 normal-case font-normal">({Math.round((form.chance ?? 0) * 100)}%)</span>
+          </label>
+          <input
+            type="range"
+            min="0.01"
+            max="1"
+            step="0.01"
+            value={form.chance ?? 0.1}
+            onChange={(e) => onChange({ chance: Number(e.target.value) })}
+            className="w-full"
+          />
+          <div className="flex justify-between text-xs text-[#23252f]/30 mt-1">
+            <span>1% (very rare)</span>
+            <span>50%</span>
+            <span>100% (always)</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

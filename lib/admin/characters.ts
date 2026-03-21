@@ -28,6 +28,13 @@ export type AdminCharacterRow = {
   sticker_enabled: boolean;
   sticker_base_chance: number;
   sticker_mood_influence: number;
+  forms: Array<{
+    display_name: string;
+    avatar: string;
+    trigger_type: "mood" | "random";
+    mood_triggers: string[];
+    chance: number;
+  }> | null;
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -176,6 +183,7 @@ export async function createAdminCharacter(formData: FormData) {
     sticker_enabled: getBoolean(formData, "stickerEnabled"),
     sticker_base_chance: getNumber(formData, "stickerBaseChance", 0.12),
     sticker_mood_influence: getNumber(formData, "stickerMoodInfluence", 0.12),
+    forms: null,
   };
 
   const { error } = await supabase.from("characters").insert(payload);
@@ -240,6 +248,16 @@ export async function updateAdminCharacter(formData: FormData) {
     sticker_enabled: getBoolean(formData, "stickerEnabled"),
     sticker_base_chance: getNumber(formData, "stickerBaseChance", 0.12),
     sticker_mood_influence: getNumber(formData, "stickerMoodInfluence", 0.12),
+    forms: (() => {
+      const raw = getString(formData, "formsJson");
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+      } catch {
+        return null;
+      }
+    })(),
     updated_at: new Date().toISOString(),
   };
 

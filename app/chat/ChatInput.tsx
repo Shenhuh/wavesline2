@@ -17,6 +17,8 @@ type ChatInputProps = {
     replyMessage?: ClientMessage;
     stickerReplyMessage?: ClientMessage | null;
     optimisticContent?: string;
+    resolvedName?: string | null;
+    resolvedAvatar?: string | null;
   }) => void;
   onStickerServerCommit?: (savedMessage: ClientMessage, stickerId: string) => void;
   onSendError?: (content: string) => void;
@@ -84,6 +86,8 @@ export default function ChatInput({
           replyMessage: data.replyMessage,
           stickerReplyMessage: data.stickerReplyMessage ?? null,
           optimisticContent: trimmed,
+          resolvedName: data.resolvedName ?? null,
+          resolvedAvatar: data.resolvedAvatar ?? null,
         });
       } else {
         router.refresh();

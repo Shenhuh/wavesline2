@@ -48,6 +48,13 @@ type CharacterRow = {
   sticker_enabled: boolean;
   sticker_base_chance: number;
   sticker_mood_influence: number;
+  forms: Array<{
+    display_name: string;
+    avatar: string;
+    trigger_type: "mood" | "random";
+    mood_triggers: string[];
+    chance: number;
+  }> | null;
 };
 
 type ThreadRow = {
@@ -333,6 +340,40 @@ function logCombinedTokenUsage(args: {
     completion_tokens: completionTokens,
     total_tokens: totalTokens,
   });
+}
+
+function resolveActiveForm(character: CharacterRow, mood: string): { name: string; avatar: string | null } {
+  const forms = character.forms;
+  if (!forms || forms.length === 0) {
+    return { name: character.name, avatar: null };
+  }
+
+  // 1. Check mood-based forms first
+  const moodMatch = forms
+    .filter((f) => f.trigger_type === "mood")
+    .find((f) =>
+      (f.mood_triggers ?? []).some((t) => t.toLowerCase() === mood.toLowerCase())
+    );
+  if (moodMatch) {
+    return {
+      name: moodMatch.display_name || character.name,
+      avatar: moodMatch.avatar || null,
+    };
+  }
+
+  // 2. Roll random forms — each rolls independently, first winner takes it
+  const randomForms = forms.filter((f) => f.trigger_type === "random");
+  for (const form of randomForms) {
+    const chance = Number(form.chance ?? 0);
+    if (chance > 0 && Math.random() < chance) {
+      return {
+        name: form.display_name || character.name,
+        avatar: form.avatar || null,
+      };
+    }
+  }
+
+  return { name: character.name, avatar: null };
 }
 
 async function getThreadData(threadId: string) {
@@ -850,10 +891,14 @@ export async function POST(req: Request) {
       messageCount: finalRuntimeState.messageCount,
     });
 
+    const resolvedForm = resolveActiveForm(contactCharacter, finalRuntimeState.mood);
+
     return NextResponse.json({
       ok: true,
       repaired,
       blocked: finalRuntimeState.blocked,
+      resolvedName: resolvedForm.name,
+      resolvedAvatar: resolvedForm.avatar,
       blockMessage: finalRuntimeState.blocked
         ? contactCharacter.block_message || "This conversation is over."
         : null,
@@ -870,6 +915,7 @@ export async function POST(req: Request) {
         contactCharacter: contactCharacter.name,
         events: events.map((e) => ({
           title: e.title,
+        
           importance: e.importance,
         })),
         monsters: monsters.map((m) => ({
