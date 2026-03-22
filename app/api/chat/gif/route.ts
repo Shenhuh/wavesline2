@@ -1,13 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
-  createReplyPlannerPrompt,
-  normalizeModelReply,
-  isWeakCharacterReply,
-  buildRepairPrompt,
-} from "@/lib/chat/reply-orchestrator";
-import { plannerProfiles } from "@/lib/chat/planner-config";
-import {
   applyAssistantReplyEffects,
   applyBlockingRule,
   deriveNextThreadRuntimeState,
@@ -25,14 +18,19 @@ import {
   buildMonsterContextBlock,
   searchRelevantMonsters,
 } from "@/lib/chat/monsters";
-import { chooseStickerForAiReply } from "@/lib/chat/sticker-ai";
+import {
+  createReplyPlannerPrompt,
+  normalizeModelReply,
+  isWeakCharacterReply,
+  buildRepairPrompt,
+} from "@/lib/chat/reply-orchestrator";
+import { plannerProfiles } from "@/lib/chat/planner-config";
 
 type CharacterRow = {
   id: string;
   key: string;
   name: string;
   title: string | null;
-  starter_message: string | null;
   base_tone: string | null;
   style_notes: string[] | null;
   likes: string[] | null;
@@ -45,9 +43,6 @@ type CharacterRow = {
   hard_constraints: string | null;
   annoyance_threshold: number;
   block_message: string | null;
-  sticker_enabled: boolean;
-  sticker_base_chance: number;
-  sticker_mood_influence: number;
   forms: Array<{
     display_name: string;
     avatar: string;
@@ -110,21 +105,11 @@ type OpenRouterResponse = {
   };
 };
 
-type GiphySearchResponse = {
-  gifs?: Array<{
-    id: string;
-    title: string;
-    url: string;
-    preview?: string;
-    width?: number;
-    height?: number;
-  }>;
-};
-
 type VisionAnalysis = {
   hasVisual: boolean;
   medium: "image" | "gif" | "unknown";
   recognizedCharacter: string | null;
+  possibleCharacter?: string | null;
   series: string | null;
   action: string | null;
   confidence: "high" | "medium" | "low";
@@ -136,11 +121,17 @@ const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
 const DEFAULT_OPENAI_VISION_MODEL =
-  process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
+  process.env.OPENAI_VISION_MODEL || "gpt-4.1";
 
 const MAX_HISTORY = 18;
-const DUPLICATE_MESSAGE_WINDOW_MS = 45_000;
-const GIF_DUPLICATE_WINDOW_MS = 120_000;
+const DUPLICATE_GIF_WINDOW_MS = 45_000;
+
+const WATERMARK_TOKENS = [
+  "tybwaizen",
+  "tybw_aizen",
+  "@tybw_aizen",
+  "@tybwaizen",
+];
 
 function arr(value: string[] | null | undefined) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
@@ -151,17 +142,296 @@ function extractReply(data: OpenRouterResponse): string {
   return typeof content === "string" ? content.trim() : "";
 }
 
-function normalizeLooseText(value: string | null | undefined) {
-  return String(value ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
-
 function isWithinWindow(isoDate: string, windowMs: number) {
   const time = new Date(isoDate).getTime();
   if (Number.isNaN(time)) return false;
   return Date.now() - time <= windowMs;
+}
+
+function cleanupVisionText(text: string): string {
+  return text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+}
+
+function safeJsonParse<T>(text: string, fallback: T): T {
+  try {
+    return JSON.parse(cleanupVisionText(text)) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeLoose(value: string | null | undefined) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function normalizeSearchText(value: string | null | undefined) {
+  return normalizeLoose(value);
+}
+
+function isPrefixMatch(a: string, b: string) {
+  if (!a || !b) return false;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length > b.length ? a : b;
+  if (shorter.length < 2) return false;
+  return longer.startsWith(shorter);
+}
+
+function isBroadSearchQuery(q: string) {
+  const query = normalizeLoose(q);
+  return new Set([
+    "wuwa",
+    "wuthering waves",
+    "wuthering",
+    "waves",
+    "anime",
+    "game",
+    "gif",
+    "reaction",
+    "character",
+  ]).has(query);
+}
+
+function isStrongCharacterSearchMatch(search: string, activeName: string) {
+  const s = normalizeLoose(search);
+  const a = normalizeLoose(activeName);
+
+  if (!s || !a) return false;
+  if (isBroadSearchQuery(s)) return false;
+  if (s === a) return true;
+  if (s.length >= 4 && a.startsWith(s)) return true;
+
+  return false;
+}
+
+function sanitizeGifTitle(title: string | null | undefined) {
+  const raw = String(title ?? "").trim();
+  if (!raw) return "";
+
+  const lower = raw.toLowerCase();
+
+  if (
+    new Set(["gif", "ww gif", "wuthering waves gif", "reaction gif"]).has(lower)
+  ) {
+    return "";
+  }
+
+  let cleaned = raw.replace(/\bgif\b/gi, "").trim();
+
+  cleaned = cleaned
+    .replace(/\bby\s+[\w.-]+\b/gi, "")
+    .replace(/\bedit\s+by\s+[\w.-]+\b/gi, "")
+    .replace(/\bsource\s*:\s*[\w.-]+\b/gi, "")
+    .trim();
+
+  if (/^[@#][\w.-]+$/i.test(cleaned)) return "";
+  if (/^[a-z0-9._-]{3,24}$/i.test(cleaned) && !cleaned.includes(" ")) return "";
+
+  return cleaned;
+}
+
+function containsWatermarkToken(value: string | null | undefined) {
+  const text = String(value ?? "").toLowerCase();
+  return WATERMARK_TOKENS.some((token) => text.includes(token));
+}
+
+function isLikelyWatermarkToken(value: string | null | undefined) {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+
+  const lower = v.toLowerCase();
+
+  if (
+    lower.includes("tybwaizen") ||
+    lower.includes("watermark") ||
+    lower.includes("source") ||
+    lower.includes("edit")
+  ) {
+    return true;
+  }
+
+  if (/^[a-z0-9._-]{3,24}$/i.test(v) && !v.includes(" ")) {
+    return true;
+  }
+
+  return false;
+}
+
+function isGenericPossibleCharacter(value: string | null | undefined) {
+  const v = normalizeLoose(value);
+  if (!v) return true;
+
+  return (
+    v.includes("character with") ||
+    v.includes("female character") ||
+    v.includes("male character") ||
+    v.includes("elf-eared") ||
+    v.includes("blue-haired") ||
+    v.includes("blonde") ||
+    v.includes("armored") ||
+    v.includes("long hair")
+  );
+}
+
+function normalizeVisionAnalysis(
+  input: Partial<VisionAnalysis> | null | undefined
+): VisionAnalysis {
+  const confidence =
+    input?.confidence === "high" ||
+    input?.confidence === "medium" ||
+    input?.confidence === "low"
+      ? input.confidence
+      : "low";
+
+  const medium =
+    input?.medium === "image" ||
+    input?.medium === "gif" ||
+    input?.medium === "unknown"
+      ? input.medium
+      : "unknown";
+
+  return {
+    hasVisual: Boolean(input?.hasVisual),
+    medium,
+    recognizedCharacter:
+      typeof input?.recognizedCharacter === "string" &&
+      input.recognizedCharacter.trim()
+        ? input.recognizedCharacter.trim()
+        : null,
+    possibleCharacter:
+      typeof input?.possibleCharacter === "string" &&
+      input.possibleCharacter.trim()
+        ? input.possibleCharacter.trim()
+        : null,
+    series:
+      typeof input?.series === "string" && input.series.trim()
+        ? input.series.trim()
+        : null,
+    action:
+      typeof input?.action === "string" && input.action.trim()
+        ? input.action.trim()
+        : null,
+    confidence,
+    conciseSummary:
+      typeof input?.conciseSummary === "string" && input.conciseSummary.trim()
+        ? input.conciseSummary.trim()
+        : null,
+    rawText:
+      typeof input?.rawText === "string" && input.rawText.trim()
+        ? input.rawText.trim()
+        : null,
+  };
+}
+
+function scrubVisionWatermarks(vision: VisionAnalysis | null): VisionAnalysis | null {
+  if (!vision) return vision;
+
+  return {
+    ...vision,
+    recognizedCharacter:
+      containsWatermarkToken(vision.recognizedCharacter) ||
+      isLikelyWatermarkToken(vision.recognizedCharacter)
+        ? null
+        : vision.recognizedCharacter,
+    possibleCharacter:
+      containsWatermarkToken(vision.possibleCharacter) ||
+      isLikelyWatermarkToken(vision.possibleCharacter) ||
+      isGenericPossibleCharacter(vision.possibleCharacter)
+        ? null
+        : vision.possibleCharacter ?? null,
+  };
+}
+
+function scrubReplyWatermarks(reply: string) {
+  let cleaned = reply;
+
+  cleaned = cleaned.replace(
+    /^\s*(tybwaizen|tybw_aizen|@tybw_aizen|@tybwaizen)\s*,?\s*(then\.)?\s*/i,
+    ""
+  );
+
+  cleaned = cleaned.replace(
+    /(^|[\s.])([^.!?]*(tybwaizen|tybw_aizen|@tybw_aizen|@tybwaizen)[^.!?]*[.!?])/gi,
+    " "
+  );
+
+  cleaned = cleaned.replace(/\s{2,}/g, " ").trim();
+
+  if (!cleaned) return "An interesting choice.";
+
+  return cleaned;
+}
+
+function doesVisionLikelyMatchActiveCharacter(args: {
+  activeCharacter: CharacterRow;
+  vision: VisionAnalysis | null;
+  searchQuery?: string | null;
+}) {
+  const { activeCharacter, vision, searchQuery } = args;
+  if (!vision) return false;
+
+  const activeName = normalizeLoose(activeCharacter.name);
+  const recognized = normalizeLoose(vision.recognizedCharacter);
+  const possible = normalizeLoose(vision.possibleCharacter);
+  const search = normalizeSearchText(searchQuery);
+
+  if (recognized && recognized === activeName) return true;
+  if (possible && possible === activeName) return true;
+  if (search && isStrongCharacterSearchMatch(search, activeName)) return true;
+
+  if (
+    vision.series === "Wuthering Waves" &&
+    !recognized &&
+    !possible &&
+    search &&
+    isPrefixMatch(search, activeName) &&
+    !isBroadSearchQuery(search)
+  ) {
+    return true;
+  }
+
+  if (
+    vision.series === "Wuthering Waves" &&
+    possible &&
+    activeName.includes("phrolova") &&
+    search &&
+    isPrefixMatch(search, activeName) &&
+    !isBroadSearchQuery(search)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildOtherCharacterLead(args: {
+  vision: VisionAnalysis | null;
+  activeCharacter: CharacterRow;
+}) {
+  const { vision, activeCharacter } = args;
+  if (!vision) return null;
+
+  const activeName = normalizeLoose(activeCharacter.name);
+  const recognized = normalizeLoose(vision.recognizedCharacter);
+  const possible = normalizeLoose(vision.possibleCharacter);
+
+  if (
+    recognized &&
+    recognized !== activeName &&
+    !isLikelyWatermarkToken(vision.recognizedCharacter)
+  ) {
+    return `${vision.recognizedCharacter}, then.`;
+  }
+
+  if (
+    possible &&
+    possible !== activeName &&
+    !isGenericPossibleCharacter(possible) &&
+    !isLikelyWatermarkToken(vision.possibleCharacter)
+  ) {
+    return `${vision.possibleCharacter}, then.`;
+  }
+
+  return null;
 }
 
 function mapDbCharacterToPlannerProfile(character: CharacterRow) {
@@ -235,198 +505,78 @@ function buildPlannerRelationshipState(input: {
 }
 
 function buildHistory(messages: MessageRow[]) {
-  return messages
-    .filter((m) => m.message_type !== "sticker" && m.message_type !== "gif")
-    .map((m) => ({
+  return messages.map((m) => {
+    const content =
+      m.message_type === "gif"
+        ? `[GIF] ${m.content ?? ""}`.trim()
+        : m.message_type === "sticker"
+        ? `[STICKER] ${m.sticker?.label ?? ""}`.trim()
+        : m.content ?? "";
+
+    return {
       role: m.sender_role === "active" ? ("user" as const) : ("assistant" as const),
-      content: m.content ?? "",
-    }));
+      content,
+    };
+  });
 }
 
-function cleanupVisionText(text: string): string {
-  return text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-}
-
-function safeJsonParse<T>(text: string, fallback: T): T {
-  try {
-    return JSON.parse(cleanupVisionText(text)) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function normalizeVisionAnalysis(input: Partial<VisionAnalysis> | null | undefined): VisionAnalysis {
-  const confidence =
-    input?.confidence === "high" || input?.confidence === "medium" || input?.confidence === "low"
-      ? input.confidence
-      : "low";
-
-  const medium =
-    input?.medium === "image" || input?.medium === "gif" || input?.medium === "unknown"
-      ? input.medium
-      : "unknown";
-
-  return {
-    hasVisual: Boolean(input?.hasVisual),
-    medium,
-    recognizedCharacter:
-      typeof input?.recognizedCharacter === "string" && input.recognizedCharacter.trim()
-        ? input.recognizedCharacter.trim()
-        : null,
-    series:
-      typeof input?.series === "string" && input.series.trim()
-        ? input.series.trim()
-        : null,
-    action:
-      typeof input?.action === "string" && input.action.trim()
-        ? input.action.trim()
-        : null,
-    confidence,
-    conciseSummary:
-      typeof input?.conciseSummary === "string" && input.conciseSummary.trim()
-        ? input.conciseSummary.trim()
-        : null,
-    rawText:
-      typeof input?.rawText === "string" && input.rawText.trim() ? input.rawText.trim() : null,
-  };
-}
-
-async function callOpenAIVision(args: {
-  apiKey: string;
-  imageUrl: string;
-  mediumHint?: "image" | "gif" | "unknown";
+function buildVisualContextBlock(args: {
+  vision: VisionAnalysis | null;
+  searchQuery: string | null;
+  activeCharacter: CharacterRow;
+  shouldTreatAsActiveCharacter: boolean;
 }) {
-  const { apiKey, imageUrl, mediumHint = "unknown" } = args;
-
-  const prompt = `
-Analyze this visual carefully.
-
-Return STRICT JSON only with this exact shape:
-{
-  "hasVisual": true,
-  "medium": "image" | "gif" | "unknown",
-  "recognizedCharacter": string | null,
-  "series": string | null,
-  "action": string | null,
-  "confidence": "high" | "medium" | "low",
-  "conciseSummary": string | null
-}
-
-Rules:
-- Only name a character if visually confident.
-- If not confident, set "recognizedCharacter" to null.
-- Do not guess a weapon, occupation, lore, or personality.
-- Do not say someone has a sword, gun, staff, or other weapon unless it is clearly visible.
-- "action" must describe only obvious visible action in a short phrase.
-- "conciseSummary" must be visual-only and brief.
-- If this seems related to Wuthering Waves, set "series" to "Wuthering Waves".
-- Use medium hint if helpful: ${mediumHint}.
-`.trim();
-
-console.log("[vision-request]", {
-  model: DEFAULT_OPENAI_VISION_MODEL,
-  hasImageUrl: !!imageUrl,
-  imageUrlPreview: imageUrl ? imageUrl.slice(0, 120) : null,
-});
-
-  const response = await fetch(OPENAI_RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: DEFAULT_OPENAI_VISION_MODEL,
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: prompt },
-            {
-              type: "input_image",
-              image_url: imageUrl,
-            },
-          ],
-          
-        },
-      ],
-      text: {
-        format: {
-          type: "json_object",
-        },
-      },
-    }),
-  });
-
-  const data = await response.json();
-
-  const outputText =
-    typeof data?.output_text === "string"
-      ? data.output_text
-      : Array.isArray(data?.output)
-      ? data.output
-          .flatMap((item: any) => (Array.isArray(item?.content) ? item.content : []))
-          .map((c: any) => c?.text ?? "")
-          .filter(Boolean)
-          .join("\n")
-      : "";
-
-  const parsed = safeJsonParse<Partial<VisionAnalysis>>(outputText, {
-    hasVisual: true,
-    medium: mediumHint,
-    recognizedCharacter: null,
-    series: null,
-    action: null,
-    confidence: "low",
-    conciseSummary: null,
-  });
-
-  const normalized = normalizeVisionAnalysis({
-    ...parsed,
-    rawText: outputText || null,
-  });
-
-  return {
-    ok: response.ok,
-    status: response.status,
-    data,
-    analysis: normalized,
-  };
-}
-
-function buildVisualContextBlock(vision: VisionAnalysis | null) {
+  const { vision, searchQuery, activeCharacter, shouldTreatAsActiveCharacter } = args;
   if (!vision || !vision.hasVisual) return "";
 
-  const lines: string[] = [];
-
-  lines.push("Visual attachment analysis is available.");
-  lines.push(`Visual medium: ${vision.medium}.`);
-  lines.push(`Visual confidence: ${vision.confidence}.`);
+  const pieces: string[] = [];
+  pieces.push("Visual attachment analysis is available.");
+  pieces.push(`Visual medium: ${vision.medium}.`);
+  pieces.push(`Visual confidence: ${vision.confidence}.`);
 
   if (vision.series) {
-    lines.push(`Detected series: ${vision.series}.`);
+    pieces.push(`Detected series: ${vision.series}.`);
   }
 
-  if (vision.recognizedCharacter) {
-    lines.push(`Recognized character: ${vision.recognizedCharacter}.`);
+  if (searchQuery?.trim()) {
+    pieces.push(`The user selected this GIF from search query: ${searchQuery.trim()}.`);
+  }
+
+  if (shouldTreatAsActiveCharacter) {
+    pieces.push(
+      `The attached GIF likely depicts ${activeCharacter.name}, the user-portrayed character in this thread.`
+    );
+    pieces.push(
+      "Treat the GIF as the user showing themself, not as a third-party identification request."
+    );
+  } else if (vision.recognizedCharacter) {
+    pieces.push(`Recognized character: ${vision.recognizedCharacter}.`);
+  } else if (vision.possibleCharacter) {
+    pieces.push(`Possible character match: ${vision.possibleCharacter}.`);
   } else {
-    lines.push("No character identity was recognized with enough confidence.");
+    pieces.push("No character identity was recognized confidently.");
   }
 
   if (vision.action) {
-    lines.push(`Visible action: ${vision.action}.`);
+    pieces.push(`Visible action: ${vision.action}.`);
   }
 
-  if (vision.conciseSummary) {
-    lines.push(`Visual summary: ${vision.conciseSummary}.`);
+  pieces.push("Ignore watermark text, editor handles, usernames, source tags, and overlay credits inside the image.");
+  pieces.push("Never use watermark text or GIF metadata as a character name.");
+  pieces.push("Do not answer like a classifier.");
+  pieces.push("Do not explain the visual like a captioning system.");
+
+  if (shouldTreatAsActiveCharacter) {
+    pieces.push("If this is likely the active character, acknowledge it naturally as 'you' or by name.");
+  } else {
+    pieces.push("If this is likely some other character, acknowledge that character naturally and briefly.");
+    pieces.push("Do not pretend that another character is the user.");
   }
 
-  lines.push("Only mention the character name if the recognition was confident.");
-  lines.push("If the recognition was uncertain, say you are not fully sure.");
-  lines.push("Do not invent weapon details unless clearly visible.");
-  lines.push("Keep visual references short.");
+  pieces.push("Keep the acknowledgment short and relational.");
+  pieces.push("Then continue with the real in-character reply.");
 
-  return lines.join("\n");
+  return pieces.join("\n");
 }
 
 function buildWorldContext(args: {
@@ -445,6 +595,7 @@ function buildWorldContext(args: {
   eventContext: string;
   monsterContext: string;
   visualContext: string;
+  shouldTreatAsActiveCharacter: boolean;
 }) {
   const {
     activeCharacter,
@@ -454,6 +605,7 @@ function buildWorldContext(args: {
     eventContext,
     monsterContext,
     visualContext,
+    shouldTreatAsActiveCharacter,
   } = args;
 
   const pieces: string[] = [];
@@ -466,24 +618,24 @@ function buildWorldContext(args: {
   );
   pieces.push("Do not speak as an assistant.");
   pieces.push("Do not use markdown.");
-  pieces.push("Do not narrate actions, body language, lighting, or shared space.");
-  pieces.push("Do not use asterisks or roleplay stage directions.");
+  pieces.push("Do not narrate actions or roleplay stage directions.");
   pieces.push("Keep the reply natural, direct, and suited for chat.");
-  pieces.push("Speak like a real person chatting, not like a system following rules.");
-  pieces.push(
-    "When answering about monsters, stay consistent with the same entity and do not switch to another."
-  );
-  pieces.push("After your text reply, the app may attach a GIF reaction.");
-  pieces.push("The GIF is only a mood accent.");
-  pieces.push("Do not overdescribe the GIF.");
-  pieces.push("If visual analysis confidently recognized a character, you may mention the name naturally.");
-  pieces.push("If visual analysis was uncertain, say you are not fully sure instead of guessing.");
-  pieces.push("If asked what the image or GIF is doing, describe only the visible action briefly.");
-  pieces.push("Do not invent weapon details unless the weapon is clearly visible.");
-  pieces.push("Do not base your entire reply on the visual.");
-  pieces.push(
-    "Do not infer deep lore, occupation, personality, or facts from the visual alone unless supported by context."
-  );
+  pieces.push("The user's latest message was a GIF.");
+
+  if (shouldTreatAsActiveCharacter) {
+    pieces.push("The GIF likely shows the user themself in their portrayed form.");
+    pieces.push("Do not identify them as if they were a separate third person.");
+    pieces.push("Acknowledge them briefly and relationally.");
+  } else {
+    pieces.push("The GIF likely shows another character, not the user.");
+    pieces.push("If a likely character is available from vision, acknowledge them briefly and naturally.");
+    pieces.push("Then respond relationally to why the user chose that character.");
+    pieces.push("Never use GIF title metadata, watermark text, usernames, editor tags, or overlay credits as if they were character names.");
+    pieces.push("If the image contains visible watermark text like a creator handle, ignore it completely.");
+  }
+
+  pieces.push("Do not over-describe the GIF.");
+  pieces.push("Do not respond like a vision captioner.");
 
   if (contactCharacter.title) {
     pieces.push(`${contactCharacter.name}'s title: ${contactCharacter.title}.`);
@@ -524,7 +676,6 @@ function logTokenUsage(args: {
   usage?: any;
 }) {
   const usage = args.usage;
-
   console.log("[token-usage]", {
     stage: args.stage,
     model: args.model,
@@ -757,70 +908,6 @@ async function insertTextMessage(args: {
   return normalized;
 }
 
-async function insertStickerMessage(args: {
-  supabase: ReturnType<typeof createAdminClient>;
-  threadId: string;
-  senderRole: "active" | "contact";
-  stickerId: string;
-  resolvedName?: string | null;
-  resolvedAvatar?: string | null;
-}) {
-  const { supabase, threadId, senderRole, stickerId, resolvedName, resolvedAvatar } = args;
-
-  const { data, error } = await supabase
-    .from("chat_messages")
-    .insert({
-      thread_id: threadId,
-      sender_role: senderRole,
-      content: null,
-      message_type: "sticker",
-      sticker_id: stickerId,
-      gif_url: null,
-      resolved_name: resolvedName ?? null,
-      resolved_avatar: resolvedAvatar ?? null,
-    })
-    .select(`
-      id,
-      thread_id,
-      sender_role,
-      content,
-      created_at,
-      message_type,
-      sticker_id,
-      gif_url,
-      resolved_name,
-      resolved_avatar,
-      sticker:stickers (
-        id,
-        key,
-        label,
-        image_path
-      )
-    `)
-    .single();
-
-  if (error) throw new Error(error.message);
-
-  const normalized = {
-    ...(data as any),
-    sticker: Array.isArray((data as any).sticker)
-      ? (data as any).sticker[0] ?? null
-      : (data as any).sticker,
-    gif_url: (data as any).gif_url ?? null,
-    resolved_name: (data as any).resolved_name ?? null,
-    resolved_avatar: (data as any).resolved_avatar ?? null,
-  } as MessageRow;
-
-  const { error: threadError } = await supabase
-    .from("chat_threads")
-    .update({ updated_at: new Date().toISOString() })
-    .eq("id", threadId);
-
-  if (threadError) throw new Error(threadError.message);
-
-  return normalized;
-}
-
 async function insertGifMessage(args: {
   supabase: ReturnType<typeof createAdminClient>;
   threadId: string;
@@ -928,214 +1015,154 @@ async function callDeepSeek(args: {
   };
 }
 
-function buildGifQueries(args: {
-  character: CharacterRow;
-  userMessage: string;
-  replyText: string;
-  mood: string;
-  vision: VisionAnalysis | null;
+async function callOpenAIVision(args: {
+  apiKey: string;
+  imageUrl: string;
+  searchQuery?: string | null;
 }) {
-  const { character, userMessage, replyText, mood, vision } = args;
-  const combined = `${userMessage} ${replyText}`.toLowerCase();
+  const { apiKey, imageUrl, searchQuery } = args;
 
-  const queries: string[] = [];
-  const ww = "wuthering waves";
-  const charName = character.name.trim();
+  const firstPrompt = `
+Analyze this GIF or image carefully.
 
-  if (vision?.recognizedCharacter) {
-    queries.push(`${vision.recognizedCharacter} wuthering waves reaction gif`);
-    queries.push(`${vision.recognizedCharacter} wuwa gif`);
-  }
-
-  if (
-    combined.includes("hello") ||
-    combined.includes("hi") ||
-    combined.includes("hey") ||
-    combined.includes("good morning") ||
-    combined.includes("good evening")
-  ) {
-    queries.push(`${ww} greeting reaction`);
-    queries.push(`${ww} hello reaction`);
-  }
-
-  if (
-    combined.includes("haha") ||
-    combined.includes("lol") ||
-    combined.includes("funny") ||
-    combined.includes("joke") ||
-    combined.includes("tease")
-  ) {
-    queries.push(`${ww} laugh reaction`);
-    queries.push(`${ww} smug reaction`);
-  }
-
-  if (
-    combined.includes("sad") ||
-    combined.includes("sorry") ||
-    combined.includes("hurt") ||
-    combined.includes("miss") ||
-    combined.includes("apolog")
-  ) {
-    queries.push(`${ww} sad reaction`);
-    queries.push(`${ww} soft reaction`);
-  }
-
-  if (
-    combined.includes("what") ||
-    combined.includes("huh") ||
-    combined.includes("why") ||
-    combined.includes("really") ||
-    combined.includes("seriously") ||
-    combined.includes("confused")
-  ) {
-    queries.push(`${ww} confused reaction`);
-    queries.push(`${ww} surprised reaction`);
-  }
-
-  if (
-    combined.includes("love") ||
-    combined.includes("cute") ||
-    combined.includes("beautiful") ||
-    combined.includes("pretty") ||
-    combined.includes("kiss") ||
-    combined.includes("like you")
-  ) {
-    queries.push(`${ww} blush reaction`);
-    queries.push(`${ww} flustered reaction`);
-  }
-
-  if (
-    combined.includes("fight") ||
-    combined.includes("battle") ||
-    combined.includes("monster") ||
-    combined.includes("enemy") ||
-    combined.includes("danger")
-  ) {
-    queries.push(`${ww} battle reaction`);
-    queries.push(`${ww} serious reaction`);
-  }
-
-  if (
-    combined.includes("lie") ||
-    combined.includes("fake") ||
-    combined.includes("trust") ||
-    combined.includes("doubt") ||
-    combined.includes("facade") ||
-    combined.includes("manipulate")
-  ) {
-    queries.push(`${ww} suspicious reaction`);
-    queries.push(`${ww} judging reaction`);
-  }
-
-  if (mood === "annoyed") {
-    queries.push(`${ww} annoyed reaction`);
-    queries.push(`${ww} unimpressed reaction`);
-  }
-
-  if (mood === "playful") {
-    queries.push(`${ww} playful reaction`);
-    queries.push(`${ww} smug reaction`);
-  }
-
-  if (mood === "curious") {
-    queries.push(`${ww} curious reaction`);
-  }
-
-  if (mood === "warm") {
-    queries.push(`${ww} warm smile reaction`);
-    queries.push(`${ww} gentle reaction`);
-  }
-
-  if (mood === "cold" || mood === "guarded") {
-    queries.push(`${ww} cold stare reaction`);
-    queries.push(`${ww} serious stare reaction`);
-  }
-
-  queries.push(`${charName} wuthering waves reaction gif`);
-  queries.push(`${charName} wuthering waves reaction`);
-  queries.push(`${charName} wuwa reaction`);
-  queries.push(`${charName} wuwa gif`);
-  queries.push(`${charName} ${ww} reaction`);
-  queries.push(`${charName} ${ww} gif`);
-  queries.push(`${charName} ${ww} meme`);
-  queries.push(`${ww} character reaction gif`);
-  queries.push(`${ww} reaction`);
-  queries.push(`${ww} gif`);
-
-  return [...new Set(queries)];
+Return STRICT JSON only with this exact shape:
+{
+  "hasVisual": true,
+  "medium": "gif",
+  "recognizedCharacter": null,
+  "possibleCharacter": string | null,
+  "series": string | null,
+  "action": string | null,
+  "confidence": "high" | "medium" | "low",
+  "conciseSummary": string | null
 }
 
-async function chooseGifForAiReply(args: {
-  origin: string;
-  character: CharacterRow;
-  userMessage: string;
-  replyText: string;
-  mood: string;
-  vision: VisionAnalysis | null;
-}) {
-  const { origin, character, userMessage, replyText, mood, vision } = args;
+Rules:
+- Do NOT force a character name.
+- "recognizedCharacter" must stay null unless the identity is unmistakable.
+- "possibleCharacter" may contain a tentative guess if there is one.
+- If it appears to be from Wuthering Waves, set "series" to "Wuthering Waves".
+- Ignore any visible watermark, editor credit, username, source tag, handle, or overlay text in the image.
+- Never treat watermark text or creator names as character identities.
+- Do not invent a weapon unless clearly visible.
+- Do not invent lore, role, or personality.
+- "action" should be a short visible-action phrase.
+- "conciseSummary" must be brief and visual-only.
+`.trim();
 
-  const queries = buildGifQueries({
-    character,
-    userMessage,
-    replyText,
-    mood,
-    vision,
+  console.log("[vision-request]", {
+    model: DEFAULT_OPENAI_VISION_MODEL,
+    hasImageUrl: !!imageUrl,
+    imageUrlPreview: imageUrl ? imageUrl.slice(0, 120) : null,
+    searchQuery: searchQuery ?? null,
   });
 
-  for (const query of queries) {
-    try {
-      const res = await fetch(
-        `${origin}/api/giphy/search?q=${encodeURIComponent(query)}&limit=15`,
-        { cache: "no-store" }
-      );
+  const firstResponse = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: DEFAULT_OPENAI_VISION_MODEL,
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: firstPrompt },
+            {
+              type: "input_image",
+              image_url: imageUrl,
+            },
+          ],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_object",
+        },
+      },
+    }),
+  });
 
-      if (!res.ok) continue;
+  const firstData = await firstResponse.json();
 
-      const data = (await res.json()) as GiphySearchResponse;
-      const gifs = Array.isArray(data.gifs) ? data.gifs.filter((g) => g?.url) : [];
-      if (!gifs.length) continue;
+  console.log("[vision-response-pass1]", {
+    ok: firstResponse.ok,
+    status: firstResponse.status,
+    output_text: firstData?.output_text ?? null,
+    usage: firstData?.usage ?? null,
+    error: firstData?.error ?? null,
+  });
 
-      if (vision?.recognizedCharacter) {
-        const characterMatch = gifs.find((g) => {
-          const title = String(g.title ?? "").toLowerCase();
-          return title.includes(vision.recognizedCharacter!.toLowerCase());
-        });
-        if (characterMatch) return characterMatch;
-      }
+  const firstOutputText =
+    typeof firstData?.output_text === "string"
+      ? firstData.output_text
+      : Array.isArray(firstData?.output)
+      ? firstData.output
+          .flatMap((item: any) => (Array.isArray(item?.content) ? item.content : []))
+          .map((c: any) => c?.text ?? "")
+          .filter(Boolean)
+          .join("\n")
+      : "";
 
-      const strictCharacterMatch = gifs.find((g) => {
-        const title = String(g.title ?? "").toLowerCase();
-        return (
-          title.includes(character.name.toLowerCase()) &&
-          (title.includes("wuthering") ||
-            title.includes("waves") ||
-            title.includes("wuwa"))
-        );
-      });
+  const firstParsed = safeJsonParse<Partial<VisionAnalysis>>(firstOutputText, {
+    hasVisual: true,
+    medium: "gif",
+    recognizedCharacter: null,
+    possibleCharacter: null,
+    series: null,
+    action: null,
+    confidence: "low",
+    conciseSummary: null,
+  });
 
-      if (strictCharacterMatch) return strictCharacterMatch;
+  let normalized = scrubVisionWatermarks(
+    normalizeVisionAnalysis({
+      ...firstParsed,
+      rawText: firstOutputText || null,
+    })
+  );
 
-      const strictWuwaMatch = gifs.find((g) => {
-        const title = String(g.title ?? "").toLowerCase();
-        return title.includes("wuthering") || title.includes("waves") || title.includes("wuwa");
-      });
+  const normalizedSearch = normalizeSearchText(searchQuery);
 
-      if (strictWuwaMatch) return strictWuwaMatch;
-    } catch (error) {
-      console.error("[chat-gif-search-error]", error);
+  if (
+    normalized?.series === "Wuthering Waves" &&
+    normalizedSearch.includes("phrolova")
+  ) {
+    if (!normalized.recognizedCharacter) {
+      normalized = {
+        ...normalized,
+        possibleCharacter: "Phrolova",
+      };
+    }
+
+    if (normalized.recognizedCharacter === "Jinhsi") {
+      normalized = {
+        ...normalized,
+        recognizedCharacter: null,
+        possibleCharacter: "Phrolova",
+        confidence: "medium",
+      };
     }
   }
 
-  return null;
+  console.log("[vision-parsed-analysis]", normalized);
+
+  return {
+    ok: firstResponse.ok,
+    status: firstResponse.status,
+    data: firstData,
+    analysis: normalized,
+  };
 }
 
-async function getReplyBundleAfterUserMessage(args: {
+async function getReplyBundleAfterMessage(args: {
   supabase: ReturnType<typeof createAdminClient>;
   threadId: string;
-  userMessageCreatedAt: string;
+  createdAt: string;
 }) {
-  const { supabase, threadId, userMessageCreatedAt } = args;
+  const { supabase, threadId, createdAt } = args;
 
   const { data, error } = await supabase
     .from("chat_messages")
@@ -1159,7 +1186,7 @@ async function getReplyBundleAfterUserMessage(args: {
     `)
     .eq("thread_id", threadId)
     .eq("sender_role", "contact")
-    .gt("created_at", userMessageCreatedAt)
+    .gt("created_at", createdAt)
     .order("created_at", { ascending: true })
     .limit(5);
 
@@ -1181,17 +1208,16 @@ async function getReplyBundleAfterUserMessage(args: {
 
   return {
     replyMessage: rows.find((m) => m.message_type === "text") ?? null,
-    stickerReplyMessage: rows.find((m) => m.message_type === "sticker") ?? null,
     gifReplyMessage: rows.find((m) => m.message_type === "gif") ?? null,
   };
 }
 
-async function findRecentDuplicateUserMessage(args: {
+async function findRecentDuplicateGifMessage(args: {
   supabase: ReturnType<typeof createAdminClient>;
   threadId: string;
-  content: string;
+  gifUrl: string;
 }) {
-  const { supabase, threadId, content } = args;
+  const { supabase, threadId, gifUrl } = args;
 
   const { data, error } = await supabase
     .from("chat_messages")
@@ -1215,10 +1241,10 @@ async function findRecentDuplicateUserMessage(args: {
     `)
     .eq("thread_id", threadId)
     .eq("sender_role", "active")
-    .eq("message_type", "text")
-    .eq("content", content)
+    .eq("message_type", "gif")
+    .eq("gif_url", gifUrl)
     .order("created_at", { ascending: false })
-    .limit(5);
+    .limit(3);
 
   if (error) throw new Error(error.message);
 
@@ -1236,33 +1262,39 @@ async function findRecentDuplicateUserMessage(args: {
     sticker: Array.isArray(row.sticker) ? row.sticker[0] ?? null : row.sticker,
   })) as MessageRow[];
 
-  return rows.find((row) => isWithinWindow(row.created_at, DUPLICATE_MESSAGE_WINDOW_MS)) ?? null;
+  return rows.find((row) => isWithinWindow(row.created_at, DUPLICATE_GIF_WINDOW_MS)) ?? null;
 }
 
-async function insertOrReuseUserMessage(args: {
+async function insertOrReuseGifMessage(args: {
   supabase: ReturnType<typeof createAdminClient>;
   threadId: string;
-  content: string;
+  gifUrl: string;
+  gifTitle?: string | null;
 }) {
-  const duplicate = await findRecentDuplicateUserMessage(args);
+  const duplicate = await findRecentDuplicateGifMessage({
+    supabase: args.supabase,
+    threadId: args.threadId,
+    gifUrl: args.gifUrl,
+  });
 
   if (duplicate) {
     return {
-      savedUserMessage: duplicate,
-      reusedExistingUserMessage: true,
+      savedGifMessage: duplicate,
+      reusedExistingGifMessage: true,
     };
   }
 
-  const savedUserMessage = await insertTextMessage({
+  const savedGifMessage = await insertGifMessage({
     supabase: args.supabase,
     threadId: args.threadId,
     senderRole: "active",
-    content: args.content,
+    gifUrl: args.gifUrl,
+    gifTitle: args.gifTitle ?? null,
   });
 
   return {
-    savedUserMessage,
-    reusedExistingUserMessage: false,
+    savedGifMessage,
+    reusedExistingGifMessage: false,
   };
 }
 
@@ -1271,71 +1303,42 @@ async function shouldSkipDuplicateReply(args: {
   threadId: string;
   justSavedUserMessageCreatedAt: string;
 }) {
-  const { supabase, threadId, justSavedUserMessageCreatedAt } = args;
-
-  const existingReplyBundle = await getReplyBundleAfterUserMessage({
-    supabase,
-    threadId,
-    userMessageCreatedAt: justSavedUserMessageCreatedAt,
+  const existingReplyBundle = await getReplyBundleAfterMessage({
+    supabase: args.supabase,
+    threadId: args.threadId,
+    createdAt: args.justSavedUserMessageCreatedAt,
   });
 
   return {
     shouldSkip:
-      !!existingReplyBundle.replyMessage ||
-      !!existingReplyBundle.stickerReplyMessage ||
-      !!existingReplyBundle.gifReplyMessage,
+      !!existingReplyBundle.replyMessage || !!existingReplyBundle.gifReplyMessage,
     existingReplyBundle,
   };
 }
 
-async function hasRecentGifForThread(args: {
-  supabase: ReturnType<typeof createAdminClient>;
-  threadId: string;
-  gifUrl?: string | null;
-}) {
-  const { supabase, threadId, gifUrl } = args;
-
-  const { data, error } = await supabase
-    .from("chat_messages")
-    .select("id, gif_url, created_at")
-    .eq("thread_id", threadId)
-    .eq("sender_role", "contact")
-    .eq("message_type", "gif")
-    .order("created_at", { ascending: false })
-    .limit(5);
-
-  if (error) throw new Error(error.message);
-
-  const rows = (data ?? []) as Array<{
-    id: string;
-    gif_url: string | null;
-    created_at: string;
-  }>;
-
-  const recentRows = rows.filter((row) => isWithinWindow(row.created_at, GIF_DUPLICATE_WINDOW_MS));
-  if (!recentRows.length) return false;
-
-  if (!gifUrl) return true;
-
-  return recentRows.some((row) => row.gif_url === gifUrl);
-}
-
 export async function POST(req: Request) {
   try {
+    console.log("[api/chat/gif] route hit");
+
     const body = await req.json();
-
     const threadId = String(body.threadId ?? "").trim();
-    const message = String(body.message ?? "").trim();
-    const imageUrl = typeof body.imageUrl === "string" ? body.imageUrl.trim() : "";
-    const imageDataUrl =
-      typeof body.imageDataUrl === "string" ? body.imageDataUrl.trim() : "";
-    const visualInput = imageDataUrl || imageUrl;
-    const mediumHint =
-      body.medium === "gif" || body.medium === "image" ? body.medium : "unknown";
+    const gifUrl = String(body.gifUrl ?? "").trim();
+    const gifTitle =
+      typeof body.gifTitle === "string" ? body.gifTitle.trim() : null;
+    const searchQuery =
+      typeof body.searchQuery === "string" ? body.searchQuery.trim() : null;
 
-    if (!threadId || !message) {
+    console.log("[api/chat/gif] incoming body", {
+      threadId,
+      hasGifUrl: !!gifUrl,
+      gifUrlPreview: gifUrl ? gifUrl.slice(0, 120) : null,
+      gifTitle,
+      searchQuery,
+    });
+
+    if (!threadId || !gifUrl) {
       return NextResponse.json(
-        { error: "Missing threadId or message." },
+        { error: "Missing threadId or gifUrl." },
         { status: 400 }
       );
     }
@@ -1367,12 +1370,8 @@ export async function POST(req: Request) {
           mood: existingRuntimeState.mood,
           blocked: existingRuntimeState.blocked,
           messageCount: existingRuntimeState.message_count,
-          lastStickerAt: (existingRuntimeState as any).last_sticker_at ?? null,
         }
-      : {
-          ...seedRuntimeStateFromRelationship(relationship),
-          lastStickerAt: null,
-        };
+      : seedRuntimeStateFromRelationship(relationship);
 
     const alreadyBlockedState = applyBlockingRule({
       state: seededState,
@@ -1400,31 +1399,44 @@ export async function POST(req: Request) {
       );
     }
 
-    const { savedUserMessage, reusedExistingUserMessage } = await insertOrReuseUserMessage({
+    const { savedGifMessage, reusedExistingGifMessage } = await insertOrReuseGifMessage({
       supabase,
       threadId,
-      content: message,
+      gifUrl,
+      gifTitle,
     });
 
     const skipDuplicateReply = await shouldSkipDuplicateReply({
       supabase,
       threadId,
-      justSavedUserMessageCreatedAt: savedUserMessage.created_at,
+      justSavedUserMessageCreatedAt: savedGifMessage.created_at,
     });
 
     if (skipDuplicateReply.shouldSkip) {
+      console.log("[reply-reused-existing]", {
+        threadId,
+        reusedExistingGifMessage,
+        existingReplyMessage: !!skipDuplicateReply.existingReplyBundle.replyMessage,
+        existingGifReplyMessage: !!skipDuplicateReply.existingReplyBundle.gifReplyMessage,
+      });
+
       return NextResponse.json({
         ok: true,
-        reusedExistingUserMessage,
+        reusedExistingGifMessage,
         skipped: true,
-        savedUserMessage,
+        savedMessage: savedGifMessage,
         replyMessage: skipDuplicateReply.existingReplyBundle.replyMessage,
-        stickerReplyMessage: skipDuplicateReply.existingReplyBundle.stickerReplyMessage,
         gifReplyMessage: skipDuplicateReply.existingReplyBundle.gifReplyMessage,
       });
     }
 
-    const nextRuntimeState = deriveNextThreadRuntimeState(seededState, message);
+    const safeGifTitle = sanitizeGifTitle(gifTitle);
+    const messageForState = "[GIF]";
+
+    const nextRuntimeState = deriveNextThreadRuntimeState(
+      seededState,
+      messageForState
+    );
 
     await upsertThreadRuntimeState({
       threadId,
@@ -1437,40 +1449,53 @@ export async function POST(req: Request) {
       messageCount: nextRuntimeState.messageCount,
     });
 
-    const updatedHistory = [...messages, savedUserMessage].slice(-MAX_HISTORY);
-
     let visionAnalysis: VisionAnalysis | null = null;
     let visionUsage: any = null;
 
-    if (visualInput) {
-      const openAIApiKey = process.env.OPENAI_API_KEY;
-      if (openAIApiKey) {
-        try {
-          const visionPass = await callOpenAIVision({
-            apiKey: openAIApiKey,
-            imageUrl: visualInput,
-            mediumHint,
+    console.log("[vision-check]", {
+      hasGifUrl: !!gifUrl,
+      hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+      visionModel: DEFAULT_OPENAI_VISION_MODEL,
+    });
+
+    if (gifUrl && process.env.OPENAI_API_KEY) {
+      try {
+        const visionPass = await callOpenAIVision({
+          apiKey: process.env.OPENAI_API_KEY,
+          imageUrl: gifUrl,
+          searchQuery,
+        });
+
+        if (visionPass.ok) {
+          visionAnalysis = scrubVisionWatermarks(visionPass.analysis);
+          visionUsage = visionPass.data?.usage ?? null;
+
+          logTokenUsage({
+            stage: "vision-pass",
+            model: DEFAULT_OPENAI_VISION_MODEL,
+            threadId,
+            character: contactCharacter.name,
+            usage: visionUsage,
           });
-
-          if (visionPass.ok) {
-            visionAnalysis = visionPass.analysis;
-            visionUsage = visionPass.data?.usage ?? null;
-
-            logTokenUsage({
-              stage: "vision-pass",
-              model: DEFAULT_OPENAI_VISION_MODEL,
-              threadId,
-              character: contactCharacter.name,
-              usage: visionUsage,
-            });
-          } else {
-            console.error("[openai-vision-error]", visionPass.data);
-          }
-        } catch (error) {
-          console.error("[openai-vision-pass-error]", error);
+        } else {
+          console.error("[openai-vision-error]", visionPass.data);
         }
+      } catch (error) {
+        console.error("[openai-vision-pass-error]", error);
       }
+    } else if (!process.env.OPENAI_API_KEY) {
+      console.warn("[vision-skipped] OPENAI_API_KEY missing");
+    } else {
+      console.warn("[vision-skipped] no gifUrl");
     }
+
+    const shouldTreatAsActiveCharacter = doesVisionLikelyMatchActiveCharacter({
+      activeCharacter,
+      vision: visionAnalysis,
+      searchQuery,
+    });
+
+    const updatedHistory = [...messages, savedGifMessage].slice(-MAX_HISTORY);
 
     const plannerCharacter = mapDbCharacterToPlannerProfile(contactCharacter);
     const plannerRelationship = buildPlannerRelationshipState(nextRuntimeState);
@@ -1482,14 +1507,21 @@ export async function POST(req: Request) {
         limit: 5,
       }),
       searchRelevantMonsters({
-        message,
+        message: messageForState,
         limit: 5,
       }),
     ]);
 
     const eventContext = buildEventContextBlock(events);
-    const monsterContext = buildMonsterContextBlock(monsters, message);
-    const visualContext = buildVisualContextBlock(visionAnalysis);
+    const monsterContext = buildMonsterContextBlock(monsters, messageForState);
+    const visualContext = buildVisualContextBlock({
+      vision: visionAnalysis,
+      searchQuery,
+      activeCharacter,
+      shouldTreatAsActiveCharacter,
+    });
+
+    console.log("[vision-context-block]", visualContext || "(empty)");
 
     const worldContext = buildWorldContext({
       activeCharacter,
@@ -1499,11 +1531,12 @@ export async function POST(req: Request) {
       eventContext,
       monsterContext,
       visualContext,
+      shouldTreatAsActiveCharacter,
     });
 
     const { plan, prompt, memorySummary, modelSettings } =
       createReplyPlannerPrompt({
-        message,
+        message: messageForState,
         history,
         relationship: plannerRelationship,
         character: plannerCharacter,
@@ -1588,6 +1621,22 @@ export async function POST(req: Request) {
       }
     }
 
+    const otherCharacterLead = buildOtherCharacterLead({
+      vision: visionAnalysis,
+      activeCharacter,
+    });
+
+    if (!shouldTreatAsActiveCharacter && otherCharacterLead) {
+      const lowerReply = reply.trim().toLowerCase();
+      const lowerLead = otherCharacterLead.toLowerCase();
+
+      if (!lowerReply.startsWith(lowerLead)) {
+        reply = `${otherCharacterLead} ${reply}`.trim();
+      }
+    }
+
+    reply = scrubReplyWatermarks(reply);
+
     logCombinedTokenUsage({
       model,
       threadId,
@@ -1595,6 +1644,17 @@ export async function POST(req: Request) {
       firstUsage: firstPass.data?.usage,
       repairUsage,
       visionUsage,
+    });
+
+    console.log("[reply-uses-vision]", {
+      hasVisionAnalysis: !!visionAnalysis,
+      recognizedCharacter: visionAnalysis?.recognizedCharacter ?? null,
+      possibleCharacter: visionAnalysis?.possibleCharacter ?? null,
+      action: visionAnalysis?.action ?? null,
+      confidence: visionAnalysis?.confidence ?? null,
+      shouldTreatAsActiveCharacter,
+      safeGifTitle,
+      finalReplyPreview: reply.slice(0, 220),
     });
 
     const preFinalRuntimeState = applyAssistantReplyEffects(nextRuntimeState, reply);
@@ -1621,81 +1681,6 @@ export async function POST(req: Request) {
       resolvedAvatar: resolvedForm.avatar,
     });
 
-    let stickerReplyMessage: MessageRow | null = null;
-    let gifReplyMessage: MessageRow | null = null;
-
-    if (!finalRuntimeState.blocked && replyMessage.content) {
-      const stickerChoice = await chooseStickerForAiReply({
-        userMessage: message,
-        replyText: replyMessage.content,
-        mood: finalRuntimeState.mood,
-        lastStickerAt: (seededState as any).lastStickerAt ?? null,
-        stickerEnabled: contactCharacter.sticker_enabled ?? false,
-        stickerBaseChance: Number(contactCharacter.sticker_base_chance ?? 0.12),
-        stickerMoodInfluence: Number(contactCharacter.sticker_mood_influence ?? 0.12),
-      });
-
-      if (stickerChoice) {
-        try {
-          stickerReplyMessage = await insertStickerMessage({
-            supabase,
-            threadId,
-            senderRole: "contact",
-            stickerId: stickerChoice.id,
-            resolvedName: resolvedForm.name !== contactCharacter.name ? resolvedForm.name : null,
-            resolvedAvatar: resolvedForm.avatar,
-          });
-
-          const { error: stickerStateError } = await supabase
-            .from("chat_thread_states")
-            .update({
-              last_sticker_at: new Date().toISOString(),
-            })
-            .eq("thread_id", threadId);
-
-          if (stickerStateError) {
-            console.error("[chat-sticker-state-error]", stickerStateError);
-          }
-        } catch (stickerError) {
-          console.error("[chat-sticker-reply-error]", stickerError);
-        }
-      }
-
-      const origin = new URL(req.url).origin;
-      const gifChoice = await chooseGifForAiReply({
-        origin,
-        character: contactCharacter,
-        userMessage: message,
-        replyText: replyMessage.content,
-        mood: finalRuntimeState.mood,
-        vision: visionAnalysis,
-      });
-
-      const canSendGif =
-        !!gifChoice &&
-        !(await hasRecentGifForThread({
-          supabase,
-          threadId,
-          gifUrl: gifChoice?.url ?? null,
-        }));
-
-      if (gifChoice && canSendGif) {
-        try {
-          gifReplyMessage = await insertGifMessage({
-            supabase,
-            threadId,
-            senderRole: "contact",
-            gifUrl: gifChoice.url,
-            gifTitle: gifChoice.title ?? null,
-            resolvedName: resolvedForm.name !== contactCharacter.name ? resolvedForm.name : null,
-            resolvedAvatar: resolvedForm.avatar,
-          });
-        } catch (gifError) {
-          console.error("[chat-gif-reply-error]", gifError);
-        }
-      }
-    }
-
     await upsertThreadRuntimeState({
       threadId,
       affinity: finalRuntimeState.affinity,
@@ -1709,60 +1694,31 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      reusedExistingUserMessage,
+      reusedExistingGifMessage,
       repaired,
       blocked: finalRuntimeState.blocked,
+      savedMessage: savedGifMessage,
+      replyMessage,
+      gifReplyMessage: null,
       resolvedName: resolvedForm.name,
       resolvedAvatar: resolvedForm.avatar,
       blockMessage: finalRuntimeState.blocked
         ? contactCharacter.block_message || "This conversation is over."
         : null,
-      savedUserMessage,
-      replyMessage,
-      stickerReplyMessage,
-      gifReplyMessage,
       debug: {
         plan,
         runtimeState: finalRuntimeState,
         relationship: plannerRelationship,
         memorySummary,
         modelSettings,
-        activeCharacter: activeCharacter.name,
-        contactCharacter: contactCharacter.name,
         vision: visionAnalysis,
-        events: events.map((e) => ({
-          title: e.title,
-          importance: e.importance,
-        })),
-        monsters: monsters.map((m) => ({
-          name: m.name,
-          class: m.class,
-          element: m.element,
-          location: m.location,
-        })),
-        tokenUsage: {
-          visionPass: visionUsage ?? null,
-          firstPass: firstPass.data?.usage ?? null,
-          repairPass: repairUsage ?? null,
-          combined: {
-            prompt_tokens:
-              (visionUsage?.prompt_tokens ?? visionUsage?.input_tokens ?? 0) +
-              (firstPass.data?.usage?.prompt_tokens ?? 0) +
-              (repairUsage?.prompt_tokens ?? 0),
-            completion_tokens:
-              (visionUsage?.completion_tokens ?? visionUsage?.output_tokens ?? 0) +
-              (firstPass.data?.usage?.completion_tokens ?? 0) +
-              (repairUsage?.completion_tokens ?? 0),
-            total_tokens:
-              (visionUsage?.total_tokens ?? 0) +
-              (firstPass.data?.usage?.total_tokens ?? 0) +
-              (repairUsage?.total_tokens ?? 0),
-          },
-        },
+        shouldTreatAsActiveCharacter,
+        safeGifTitle,
+        otherCharacterLead,
       },
     });
   } catch (error) {
-    console.error("[chat-api-error]", error);
+    console.error("[chat-gif-api-error]", error);
 
     return NextResponse.json(
       {

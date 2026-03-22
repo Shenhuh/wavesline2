@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ChatInput from "./ChatInput";
 import MessageBubble, { TypingIndicator } from "./MessageBubble";
 import type { StickerOption } from "./StickerPicker";
+import type { GifOption } from "./GifPicker";
 
 export type ClientMessage = {
   id: string;
@@ -11,11 +12,16 @@ export type ClientMessage = {
   sender_role: "active" | "contact";
   content: string | null;
   created_at: string;
-  message_type: "text" | "sticker";
+  message_type: "text" | "sticker" | "gif";
   sticker_id: string | null;
   sticker: { id: string; key: string; label: string; image_path: string } | null;
+  gif_url?: string | null;
+  // From optimistic stamping (new messages)
   resolvedName?: string | null;
   resolvedAvatar?: string | null;
+  // From DB (persisted after refresh)
+  resolved_name?: string | null;
+  resolved_avatar?: string | null;
 };
 
 type ChatMessagesClientProps = {
@@ -120,6 +126,75 @@ export default function ChatMessagesClient({
     ]);
   }
 
+  function handleStickerAiReply(args: {
+    replyMessage: ClientMessage;
+    stickerReplyMessage?: ClientMessage | null;
+    resolvedName?: string | null;
+    resolvedAvatar?: string | null;
+  }) {
+    const { replyMessage, stickerReplyMessage, resolvedName, resolvedAvatar } = args;
+    const stampedReply = { ...replyMessage, resolvedName: resolvedName ?? null, resolvedAvatar: resolvedAvatar ?? null };
+    const stampedSticker = stickerReplyMessage
+      ? { ...stickerReplyMessage, resolvedName: resolvedName ?? null, resolvedAvatar: resolvedAvatar ?? null }
+      : null;
+    if (replyMessage) fireNewMessage(threadId, replyMessage.created_at);
+    if (stickerReplyMessage) fireNewMessage(threadId, stickerReplyMessage.created_at);
+    setOptimisticMessages((prev) => {
+      const next = [...prev, stampedReply];
+      if (stampedSticker) next.push(stampedSticker);
+      return next;
+    });
+  }
+
+  function appendOptimisticGifMessage(gif: GifOption) {
+    setOptimisticMessages((prev) => [...prev, {
+      id: `optimistic-gif-${crypto.randomUUID()}`,
+      thread_id: threadId,
+      sender_role: "active",
+      content: gif.title,
+      created_at: new Date().toISOString(),
+      message_type: "gif",
+      sticker_id: null,
+      sticker: null,
+      gif_url: gif.url,
+    }]);
+    setIsTyping(true);
+  }
+
+  function replaceGifAfterServer(args: {
+    savedMessage: ClientMessage;
+    replyMessage?: ClientMessage | null;
+    gifReplyMessage?: ClientMessage | null;
+    optimisticGifUrl?: string;
+    resolvedName?: string | null;
+    resolvedAvatar?: string | null;
+  }) {
+    const { savedMessage, replyMessage, gifReplyMessage, optimisticGifUrl, resolvedName, resolvedAvatar } = args;
+    if (replyMessage) fireNewMessage(threadId, replyMessage.created_at);
+    if (gifReplyMessage) fireNewMessage(threadId, gifReplyMessage.created_at);
+    const stampedReply = replyMessage
+      ? { ...replyMessage, resolvedName: resolvedName ?? null, resolvedAvatar: resolvedAvatar ?? null }
+      : null;
+    const stampedGifReply = gifReplyMessage
+      ? { ...gifReplyMessage, resolvedName: resolvedName ?? null, resolvedAvatar: resolvedAvatar ?? null }
+      : null;
+    setIsTyping(false);
+    setOptimisticMessages((prev) => {
+      let next = optimisticGifUrl
+        ? prev.filter((m) => !(m.id.startsWith("optimistic-gif-") && m.gif_url === optimisticGifUrl))
+        : prev;
+      next = [...next, savedMessage];
+      if (stampedReply) next.push(stampedReply);
+      if (stampedGifReply) next.push(stampedGifReply);
+      return next;
+    });
+  }
+
+  function rollbackOptimisticGif(gifUrl: string) {
+    setIsTyping(false);
+    setOptimisticMessages((prev) => prev.filter((m) => !(m.id.startsWith("optimistic-gif-") && m.gif_url === gifUrl)));
+  }
+
   function rollbackOptimistic(content: string) {
     setIsTyping(false);
     setOptimisticMessages((prev) => prev.filter((m) => !(m.id.startsWith("optimistic-user-") && m.sender_role === "active" && m.content === content)));
@@ -158,12 +233,12 @@ export default function ChatMessagesClient({
                 message={message}
                 activeCharacterName={activeCharacterName}
                 activeCharacterAvatar={activeCharacterAvatar}
-                contactCharacterName={message.resolvedName ?? contactCharacterName}
+                contactCharacterName={message.resolvedName ?? message.resolved_name ?? contactCharacterName}
                 contactCharacterKey={contactCharacterKey}
                 contactVoiceOnly={contactVoiceOnly}
                 contactAutoPlayVoice={contactAutoPlayVoice}
                 contactPreferredVoice={contactPreferredVoice}
-                contactAvatar={message.resolvedAvatar ?? contactAvatar}
+                contactAvatar={message.resolvedAvatar ?? message.resolved_avatar ?? contactAvatar}
                 isLatestContactMessage={message.id === latestContactMessageId}
               />
             ))}
@@ -184,6 +259,10 @@ export default function ChatMessagesClient({
         onOptimisticStickerSend={appendOptimisticStickerMessage}
         onServerCommit={replaceAfterServer}
         onStickerServerCommit={replaceStickerAfterServer}
+        onStickerAiReply={handleStickerAiReply}
+        onOptimisticGifSend={appendOptimisticGifMessage}
+        onGifServerCommit={replaceGifAfterServer}
+        onGifSendError={rollbackOptimisticGif}
         onSendError={rollbackOptimistic}
         onStickerSendError={rollbackOptimisticSticker}
       />

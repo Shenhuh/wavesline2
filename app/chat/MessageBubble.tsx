@@ -1,70 +1,8 @@
 "use client";
-import { useState, useEffect } from "react";
+
+import { useState } from "react";
 import SpeechButton from "./SpeechButton";
 import type { ClientMessage } from "./ChatMessagesClient";
-
-type MessagePart =
-  | { type: "text"; content: string }
-  | { type: "visualization"; content: string };
-
-function parseMessageContent(text: string): MessagePart[] {
-  const parts: MessagePart[] = [];
-
-  // Match properly closed tags
-  const closedRegex = /<visualization>([\s\S]*?)<\/visualization>/g;
-  let lastIndex = 0;
-  let match;
-
-  while ((match = closedRegex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      const t = text.slice(lastIndex, match.index).trim();
-      if (t) parts.push({ type: "text", content: t });
-    }
-    parts.push({ type: "visualization", content: match[1].trim() });
-    lastIndex = match.index + match[0].length;
-  }
-
-  // Handle unclosed <visualization> tag (model got cut off)
-  const remaining = text.slice(lastIndex);
-  const unclosedIdx = remaining.indexOf("<visualization>");
-  if (unclosedIdx !== -1) {
-    const before = remaining.slice(0, unclosedIdx).trim();
-    if (before) parts.push({ type: "text", content: before });
-    const vizContent = remaining.slice(unclosedIdx + "<visualization>".length).trim();
-    if (vizContent) parts.push({ type: "visualization", content: vizContent });
-  } else {
-    const t = remaining.trim();
-    if (t) parts.push({ type: "text", content: t });
-  }
-
-  return parts.length > 0 ? parts : [{ type: "text", content: text }];
-}
-
-function VisualizationBlock({ html }: { html: string }) {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  if (!mounted) return null;
-
-  return (
-    <div
-      style={{
-        margin: "6px 0",
-        borderRadius: 12,
-        overflow: "hidden",
-        border: "1px solid rgba(35,37,47,0.1)",
-        background: "#fff",
-        padding: "12px 10px",
-        maxWidth: "100%",
-        overflowX: "auto",
-      }}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
-}
 
 type MessageBubbleProps = {
   message: ClientMessage;
@@ -204,6 +142,15 @@ export default function MessageBubble({
                 />
                 <div className="text-xs text-white/50">{message.sticker.label}</div>
               </div>
+            ) : message.message_type === "gif" && message.gif_url ? (
+              <div className="space-y-1">
+                <img
+                  src={message.gif_url}
+                  alt={message.content ?? "GIF"}
+                  className="rounded-lg object-cover"
+                  style={{ maxWidth: 200, maxHeight: 160 }}
+                />
+              </div>
             ) : (
               message.content
             )}
@@ -228,6 +175,7 @@ export default function MessageBubble({
             background: "#ffffff",
             borderRadius: "14px 14px 14px 4px",
             wordBreak: "break-word",
+            whiteSpace: "pre-wrap",
             boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
           }}
         >
@@ -239,6 +187,15 @@ export default function MessageBubble({
                 className="h-20 w-20 object-contain sm:h-24 sm:w-24"
               />
               <div className="text-xs text-[#23252f]/40">{message.sticker.label}</div>
+            </div>
+          ) : message.message_type === "gif" && message.gif_url ? (
+            <div className="space-y-1">
+              <img
+                src={message.gif_url}
+                alt={message.content ?? "GIF"}
+                className="rounded-lg object-cover"
+                style={{ maxWidth: 200, maxHeight: 160 }}
+              />
             </div>
           ) : isVoiceCharacterReply ? (
             <div className="min-w-[160px] space-y-2.5 sm:min-w-[180px]">
@@ -272,20 +229,9 @@ export default function MessageBubble({
                 </div>
               )}
             </div>
-          ) : (() => {
-              const parts = parseMessageContent(message.content ?? "");
-              return (
-                <>
-                  {parts.map((part, i) =>
-                    part.type === "visualization" ? (
-                      <VisualizationBlock key={i} html={part.content} />
-                    ) : (
-                      <span key={i} style={{ whiteSpace: "pre-wrap" }}>{part.content}</span>
-                    )
-                  )}
-                </>
-              );
-            })()}
+          ) : (
+            message.content
+          )}
         </div>
       </div>
     </div>

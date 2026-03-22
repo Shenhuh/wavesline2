@@ -245,42 +245,7 @@ export default async function ChatPage({
             )}
           </header>
 
-          {currentThread ? (
-            <ChatMessagesClient
-              key={currentThread.id}
-              threadId={currentThread.id}
-              activeCharacterName={activeCharacter.name}
-              activeCharacterAvatar={activeCharacter.avatar ?? null}
-              contactCharacterName={currentThread.contact?.name ?? "Unknown"}
-              contactCharacterKey={
-                fullContactCharacter?.key ?? currentThread.contact?.key
-              }
-              contactVoiceOnly={fullContactCharacter?.voice_only ?? false}
-              contactAutoPlayVoice={fullContactCharacter?.auto_play_voice ?? false}
-              contactPreferredVoice={fullContactCharacter?.preferred_voice ?? null}
-              contactAvatar={currentThread.contact?.avatar ?? null}
-              stickers={stickers.map((sticker) => ({
-                id: sticker.id,
-                key: sticker.key,
-                label: sticker.label,
-                image_path: sticker.image_path,
-              }))}
-              initialMessages={messages}
-              blocked={isBlocked}
-              blockMessage={blockMessage}
-            />
-          ) : (
-            <>
-              <div className="flex-1 overflow-y-auto bg-[#f5f7fa] px-6 py-5">
-                <div className="rounded-xl border border-dashed border-black/10 bg-white p-4 text-sm text-[#677388]">
-                  Pick a contact first.
-                </div>
-              </div>
-              <div className="border-t border-black/10 p-4">
-                <div className="text-sm text-[#677388]">No active thread.</div>
-              </div>
-            </>
-          )}
+      
         </section>
       </div>
     </main>

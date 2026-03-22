@@ -53,9 +53,12 @@ export type ChatMessageRow = {
   sender_role: "active" | "contact";
   content: string | null;
   created_at: string;
-  message_type: "text" | "sticker";
+  message_type: "text" | "sticker" | "gif";
   sticker_id: string | null;
   sticker: ChatMessageSticker;
+  resolved_name: string | null;
+  resolved_avatar: string | null;
+  gif_url: string | null;
 };
 
 export type ChatThreadStateRow = {
@@ -273,6 +276,9 @@ export async function listMessages(
       created_at,
       message_type,
       sticker_id,
+      resolved_name,
+      resolved_avatar,
+      gif_url,
       sticker:stickers (
         id,
         key,
@@ -294,6 +300,9 @@ export async function listMessages(
     message_type: row.message_type ?? "text",
     sticker_id: row.sticker_id ?? null,
     sticker: Array.isArray(row.sticker) ? row.sticker[0] ?? null : row.sticker,
+    resolved_name: row.resolved_name ?? null,
+    resolved_avatar: row.resolved_avatar ?? null,
+    gif_url: row.gif_url ?? null,
   }));
 }
 
