@@ -26,6 +26,8 @@ import {
   searchRelevantMonsters,
 } from "@/lib/chat/monsters";
 import { chooseStickerForAiReply } from "@/lib/chat/sticker-ai";
+import { getDirectFactualAnswer } from "@/lib/chat/factual";
+import { getLoreContextForCharacter } from "@/lib/chat/lore";
 
 type CharacterRow = {
   id: string;
@@ -125,8 +127,10 @@ type VisionAnalysis = {
   hasVisual: boolean;
   medium: "image" | "gif" | "unknown";
   recognizedCharacter: string | null;
+  possibleCharacter: string | null;
   series: string | null;
   action: string | null;
+  expression: string | null;
   confidence: "high" | "medium" | "low";
   conciseSummary: string | null;
   rawText: string | null;
@@ -138,8 +142,8 @@ const DEFAULT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
 const DEFAULT_OPENAI_VISION_MODEL =
   process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
 
-const MAX_HISTORY = 18;
-const DUPLICATE_MESSAGE_WINDOW_MS = 45_000;
+const MAX_HISTORY = 8;
+const DUPLICATE_MESSAGE_WINDOW_MS = 60_000;
 const GIF_DUPLICATE_WINDOW_MS = 120_000;
 
 function arr(value: string[] | null | undefined) {
@@ -162,6 +166,264 @@ function isWithinWindow(isoDate: string, windowMs: number) {
   const time = new Date(isoDate).getTime();
   if (Number.isNaN(time)) return false;
   return Date.now() - time <= windowMs;
+}
+
+
+function replyDeniesSeenCharacter(reply: string) {
+  const text = normalizeLooseText(reply);
+
+  return (
+    text.includes("that is not me") ||
+    text.includes("that's not me") ||
+    text.includes("that isnt me") ||
+    text.includes("that isn't me") ||
+    text.includes("this is not me") ||
+    text.includes("not me.")
+  );
+}
+
+
+function includesAnyLoose(text: string, values: string[]) {
+  return values.some((value) => text.includes(value));
+}
+
+function detectFactionNameFromText(message: string) {
+  const text = normalizeLooseText(message);
+
+  const map: Record<string, string> = {
+    fractsidus: "Fractsidus",
+    "order of the deep": "Order of the Deep",
+    "fisalia family": "Fisalia Family",
+    fisalia: "Fisalia Family",
+    "midnight rangers": "Midnight Rangers",
+    "montelli family": "Montelli Family",
+    montelli: "Montelli Family",
+    "black shores": "Black Shores",
+  };
+
+  for (const [keyword, name] of Object.entries(map)) {
+    if (text.includes(keyword)) return name;
+  }
+
+  return null;
+}
+
+function isFactionFollowupQuestion(message: string) {
+  const text = normalizeLooseText(message);
+
+  return (
+    includesAnyLoose(text, [
+      "their names",
+      "their members",
+      "the members",
+      "member names",
+      "who are they",
+      "who are the members",
+      "can you tell me their names",
+      "can you tell me their members",
+      "do you know their members",
+      "tell me their names",
+      "tell me their members",
+    ]) ||
+    (/\btheir\b/.test(text) && /\b(names|members)\b/.test(text))
+  );
+}
+
+function inferFactionNameFromRecentHistory(messages: MessageRow[]) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i]?.content;
+    if (!content) continue;
+    const match = detectFactionNameFromText(content);
+    if (match) return match;
+  }
+  return null;
+}
+
+async function fetchFactionByNameDirect(args: {
+  supabase: ReturnType<typeof createAdminClient>;
+  factionName: string;
+}) {
+  const { supabase, factionName } = args;
+
+  const { data, error } = await supabase
+    .from("factions")
+    .select("name, ideology, members")
+    .eq("name", factionName)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  return (data as { name: string; ideology: string | null; members: string | null } | null) ?? null;
+}
+
+function parseFactionMembers(raw: string | null | undefined) {
+  const text = String(raw ?? "").trim();
+  if (!text) return [] as string[];
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const names: string[] = [];
+  for (const line of lines) {
+    if (/^#{1,6}\s*/.test(line)) continue;
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    const source = bullet ? bullet[1] : line;
+    const cleaned = source
+      .replace(/^[•]+\s*/, "")
+      .split(/[—–-]/)[0]
+      .replace(/\([^)]*\)/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!cleaned) continue;
+    if (/^(notable confirmed members|notes|save changes|cancel changes)$/i.test(cleaned)) continue;
+    if (!names.includes(cleaned)) names.push(cleaned);
+  }
+
+  return names;
+}
+
+function joinNaturally(values: string[]) {
+  if (values.length === 0) return "";
+  if (values.length === 1) return values[0];
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(", ")}, and ${values[values.length - 1]}`;
+}
+
+function buildFactionMembersReply(args: {
+  factionName: string;
+  members: string[];
+}) {
+  const { factionName, members } = args;
+  if (!members.length) return `I don't have enough information about the members of ${factionName}.`;
+  return `Known ${factionName} members include ${joinNaturally(members)}.`;
+}
+
+function isRegionListQuestion(message: string) {
+  const text = normalizeLooseText(message);
+  return (
+    includesAnyLoose(text, [
+      "what are the regions",
+      "what regions are there",
+      "tell me the regions",
+      "name the regions",
+      "list the regions",
+      "tell me about the regions",
+      "regions of this world",
+      "regions in this world",
+      "what are the regions of this world",
+      "all regions",
+      "other regions",
+      "more regions",
+      "tell me more about regions",
+      "tell me more about other regions",
+      "can you tell me more about regions",
+      "can you tell me more about other regions",
+      "regions of solaris",
+      "regions of solaris-3",
+      "regions in solaris",
+      "regions in solaris-3",
+    ]) ||
+    (/\bregions\b/.test(text) &&
+      includesAnyLoose(text, ["solaris-3", "solaris 3", "solaris", "all regions", "this world", "the world", "other", "more"]))
+  );
+}
+
+async function fetchAllRegionsDirect(args: {
+  supabase: ReturnType<typeof createAdminClient>;
+}) {
+  const { supabase } = args;
+  const { data, error } = await supabase
+    .from("regions")
+    .select("name")
+    .order("name", { ascending: true });
+
+  if (error) throw new Error(error.message);
+
+  return ((data ?? []) as Array<{ name: string | null }>)
+    .map((row) => String(row.name ?? "").trim())
+    .filter(Boolean);
+}
+
+function buildRegionListReply(regionNames: string[]) {
+  if (!regionNames.length) return "I don't have enough information about that.";
+  return `The known regions of Solaris-3 are ${joinNaturally(regionNames)}.`;
+}
+
+function trimDbText(text: string | null | undefined) {
+  return String(text ?? "")
+    .replace(/#{1,6}\s*/g, "")      // Remove markdown headers
+    .replace(/\*\*/g, "")           // Remove bold markers
+    .replace(/`/g, "")              // Remove inline code markers
+    .replace(/\n{2,}/g, "\n")       // Replace 2+ newlines with single newline
+    .replace(/\n/g, "")             // Then remove all newlines if that's the goal
+    .trim();
+}
+
+function firstSentence(text: string | null | undefined) {
+  const cleaned = trimDbText(text)
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return "";
+
+  const sentenceMatch = cleaned.match(/^[^.!?]+[.!?]?/);
+  return (sentenceMatch?.[0] ?? cleaned).trim();
+}
+
+function isCharacterIdentityQuestion(message: string) {
+  const text = normalizeLooseText(message);
+
+  return (
+    /^who are you\??$/.test(text) ||
+    /^what are you\??$/.test(text) ||
+    includesAnyLoose(text, [
+      "who are you",
+      "what are you",
+      "tell me about yourself",
+      "introduce yourself",
+      "who is phrolova",
+      "what is phrolova",
+      "tell me who you are",
+      "your title",
+      "what should i call you",
+    ])
+  );
+}
+
+function buildCharacterIdentityDirectReply(character: CharacterRow) {
+  const parts: string[] = [];
+
+  parts.push(`I am ${character.name}.`);
+
+  if (character.title?.trim()) {
+    parts.push(`${character.title.trim()}.`);
+  }
+
+  const identityLine = firstSentence(character.identity_notes);
+  if (identityLine) {
+    if (!parts.some((p) => p.toLowerCase() === identityLine.toLowerCase())) {
+      parts.push(identityLine.endsWith(".") || identityLine.endsWith("!") || identityLine.endsWith("?") ? identityLine : `${identityLine}.`);
+    }
+  } else {
+    const loreLine = firstSentence(character.lore_context);
+    if (loreLine) {
+      parts.push(loreLine.endsWith(".") || loreLine.endsWith("!") || loreLine.endsWith("?") ? loreLine : `${loreLine}.`);
+    }
+  }
+
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function buildCharacterIdentityFacts(character: CharacterRow) {
+  return [
+    "Question type: character identity",
+    `Character: ${character.name}`,
+    `Title: ${character.title?.trim() || "N/A"}`,
+    `Identity notes: ${trimDbText(character.identity_notes) || "N/A"}`,
+    `Lore context: ${trimDbText(character.lore_context) || "N/A"}`,
+  ].join("");
 }
 
 function mapDbCharacterToPlannerProfile(character: CharacterRow) {
@@ -273,6 +535,10 @@ function normalizeVisionAnalysis(input: Partial<VisionAnalysis> | null | undefin
       typeof input?.recognizedCharacter === "string" && input.recognizedCharacter.trim()
         ? input.recognizedCharacter.trim()
         : null,
+    possibleCharacter:
+      typeof input?.possibleCharacter === "string" && input.possibleCharacter.trim()
+        ? input.possibleCharacter.trim()
+        : null,
     series:
       typeof input?.series === "string" && input.series.trim()
         ? input.series.trim()
@@ -280,6 +546,10 @@ function normalizeVisionAnalysis(input: Partial<VisionAnalysis> | null | undefin
     action:
       typeof input?.action === "string" && input.action.trim()
         ? input.action.trim()
+        : null,
+    expression:
+      typeof input?.expression === "string" && input.expression.trim()
+        ? input.expression.trim()
         : null,
     confidence,
     conciseSummary:
@@ -306,8 +576,10 @@ Return STRICT JSON only with this exact shape:
   "hasVisual": true,
   "medium": "image" | "gif" | "unknown",
   "recognizedCharacter": string | null,
+  "possibleCharacter": string | null,
   "series": string | null,
   "action": string | null,
+  "expression": string | null,
   "confidence": "high" | "medium" | "low",
   "conciseSummary": string | null
 }
@@ -315,9 +587,11 @@ Return STRICT JSON only with this exact shape:
 Rules:
 - Only name a character if visually confident.
 - If not confident, set "recognizedCharacter" to null.
+- "possibleCharacter" may contain a tentative guess if there is one.
 - Do not guess a weapon, occupation, lore, or personality.
 - Do not say someone has a sword, gun, staff, or other weapon unless it is clearly visible.
 - "action" must describe only obvious visible action in a short phrase.
+- "expression" must describe the obvious visible facial expression briefly.
 - "conciseSummary" must be visual-only and brief.
 - If this seems related to Wuthering Waves, set "series" to "Wuthering Waves".
 - Use medium hint if helpful: ${mediumHint}.
@@ -375,8 +649,10 @@ console.log("[vision-request]", {
     hasVisual: true,
     medium: mediumHint,
     recognizedCharacter: null,
+    possibleCharacter: null,
     series: null,
     action: null,
+    expression: null,
     confidence: "low",
     conciseSummary: null,
   });
@@ -394,45 +670,162 @@ console.log("[vision-request]", {
   };
 }
 
-function buildVisualContextBlock(vision: VisionAnalysis | null) {
+function buildVisualContextBlock(args: {
+  vision: VisionAnalysis | null;
+  activeCharacter: CharacterRow;
+  contactCharacter: CharacterRow;
+  detectedRelationship?: {
+    name: string;
+    relationship_label: string | null;
+    affinity: number;
+    trust: number;
+    familiarity: number;
+    notes: string | null;
+  } | null;
+}) {
+  const { vision, activeCharacter, contactCharacter, detectedRelationship } = args;
   if (!vision || !vision.hasVisual) return "";
 
   const lines: string[] = [];
+  const recognized = vision.recognizedCharacter?.trim() || null;
+  const possible = (vision as any).possibleCharacter?.trim() || null;
+  const matchActive = recognized === activeCharacter.name || possible === activeCharacter.name;
+  const matchContact = recognized === contactCharacter.name || possible === contactCharacter.name;
 
-  lines.push("Visual attachment analysis is available.");
-  lines.push(`Visual medium: ${vision.medium}.`);
-  lines.push(`Visual confidence: ${vision.confidence}.`);
+  lines.push("A visual attachment is present.");
 
-  if (vision.series) {
-    lines.push(`Detected series: ${vision.series}.`);
+  if (matchActive) {
+    lines.push(`The visual most likely shows ${activeCharacter.name}, the user-presented character.`);
+    lines.push("Treat that as the user, not as a third-person identification task.");
+  } else if (matchContact) {
+    lines.push(`The visual most likely shows ${contactCharacter.name}.`);
+  } else if (recognized) {
+    lines.push(`Recognized character: ${recognized}.`);
+  } else if (possible) {
+    lines.push(`Possible character: ${possible}.`);
   }
 
-  if (vision.recognizedCharacter) {
-    lines.push(`Recognized character: ${vision.recognizedCharacter}.`);
-  } else {
-    lines.push("No character identity was recognized with enough confidence.");
+  if (vision.action) lines.push(`Visible action: ${vision.action}.`);
+  if (vision.expression) lines.push(`Visible expression: ${vision.expression}.`);
+
+  if (detectedRelationship) {
+    lines.push(
+      `${contactCharacter.name} has an existing relationship with ${detectedRelationship.name}: ` +
+        `label=${detectedRelationship.relationship_label ?? "unspecified"}, ` +
+        `affinity=${detectedRelationship.affinity}, trust=${detectedRelationship.trust}, familiarity=${detectedRelationship.familiarity}.`
+    );
+
+    if (detectedRelationship.notes?.trim()) {
+      lines.push(`Relationship notes: ${detectedRelationship.notes.trim()}`);
+    }
+
+    lines.push("Let that relationship influence the reaction more than generic visual description.");
   }
 
-  if (vision.action) {
-    lines.push(`Visible action: ${vision.action}.`);
-  }
-
-  if (vision.conciseSummary) {
-    lines.push(`Visual summary: ${vision.conciseSummary}.`);
-  }
-
-  lines.push("Only mention the character name if the recognition was confident.");
-  lines.push("If the recognition was uncertain, say you are not fully sure.");
-  lines.push("Do not invent weapon details unless clearly visible.");
-  lines.push("Keep visual references short.");
+  lines.push("Mention only what is visually clear.");
+  lines.push("Do not mention franchise or series names unless the user explicitly asks.");
+  lines.push("Keep any visual reference brief and natural.");
 
   return lines.join("\n");
+}
+
+async function findRelationshipWithDetectedCharacter(args: {
+  supabase: ReturnType<typeof createAdminClient>;
+  contactCharacterId: string;
+  detectedCharacterName: string | null;
+}) {
+  const { supabase, contactCharacterId, detectedCharacterName } = args;
+
+  const detected = String(detectedCharacterName ?? "").trim();
+  if (!detected) return null;
+
+  const { data: targetCharacter, error: targetError } = await supabase
+    .from("characters")
+    .select("id, name")
+    .ilike("name", detected)
+    .maybeSingle();
+
+  if (targetError || !targetCharacter) return null;
+
+  const { data: rel, error: relError } = await supabase
+    .from("character_relationships")
+    .select("relationship_label, affinity, trust, familiarity, notes")
+    .eq("source_character_id", contactCharacterId)
+    .eq("target_character_id", targetCharacter.id)
+    .maybeSingle();
+
+  if (relError) return null;
+
+  return rel
+    ? {
+        name: targetCharacter.name as string,
+        relationship_label: rel.relationship_label as string | null,
+        affinity: Number(rel.affinity ?? 0),
+        trust: Number(rel.trust ?? 0),
+        familiarity: Number(rel.familiarity ?? 0),
+        notes: (rel.notes as string | null) ?? null,
+      }
+    : null;
+}
+
+function shouldIncludeEventContext(message: string, vision: VisionAnalysis | null) {
+  const text = normalizeLooseText(message);
+  if (!text) return false;
+  if (isRegionListQuestion(text)) return false;
+
+  return /(lore|story|history|past|event|timeline|region|faction|sentinel|threnodian|fractsidus|lament|patch)/i.test(text);
+}
+
+function shouldIncludeMonsterContext(message: string) {
+  const text = normalizeLooseText(message);
+  if (!text) return false;
+
+  return /(monster|enemy|boss|echo|tacet|overlord|calamity|nightmare)/i.test(text);
+}
+
+function buildFactualContextBlock(args: {
+  factual:
+    | Awaited<ReturnType<typeof getDirectFactualAnswer>>
+    | null;
+}) {
+  const factual = args.factual;
+  if (!factual?.answered) return "";
+
+  const lines: string[] = [];
+  lines.push("FACTUAL WORLD KNOWLEDGE");
+  lines.push("The user asked for factual information. Use the exact facts below as the backbone of the reply.");
+  lines.push("Stay in character and conversational, but do not invent facts beyond what is written here.");
+  lines.push("Answer naturally like a roleplay chatbot, not like a wiki paste and not like a detached assistant.");
+  lines.push("When the user asks about identity, answer in first person and make it sound like self-introduction, but keep the factual content grounded in these facts.");
+  lines.push("For lists like members, monsters, or regions, keep the listed names exact.");
+  if (factual.kind === "region_list") {
+    lines.push("This is a region-list answer.");
+    lines.push("You may rephrase naturally, but every named place in the reply must come from the allowed region names below.");
+    lines.push("Do not add cities, subregions, landmarks, nations, or guesses that are not explicitly listed.");
+  }
+  lines.push("Do not contradict these facts.");
+  lines.push(factual.facts);
+
+  return lines.join("\n");
+}
+
+
+function shouldLockDirectFactualReply(
+  factual:
+    | Awaited<ReturnType<typeof getDirectFactualAnswer>>
+    | null
+) {
+  if (!factual?.answered) return false;
+  return (
+    factual.kind === "faction_members" ||
+    factual.kind === "monster_list" ||
+    factual.kind === "region_list"
+  );
 }
 
 function buildWorldContext(args: {
   activeCharacter: CharacterRow;
   contactCharacter: CharacterRow;
-  relationship: RelationshipRow | null;
   runtimeState: {
     affinity: number;
     annoyance: number;
@@ -442,6 +835,8 @@ function buildWorldContext(args: {
     blocked: boolean;
     messageCount: number;
   };
+  factualContext: string;
+  retrievedLoreContext: string;
   eventContext: string;
   monsterContext: string;
   visualContext: string;
@@ -449,8 +844,9 @@ function buildWorldContext(args: {
   const {
     activeCharacter,
     contactCharacter,
-    relationship,
     runtimeState,
+    factualContext,
+    retrievedLoreContext,
     eventContext,
     monsterContext,
     visualContext,
@@ -458,57 +854,15 @@ function buildWorldContext(args: {
 
   const pieces: string[] = [];
 
+  pieces.push(`Chat app context: the user is portraying ${activeCharacter.name}. You are ${contactCharacter.name}.`);
+  pieces.push("Reply like a real person texting: concise, in-character, no markdown, no stage directions.");
   pieces.push(
-    `This is a one-on-one text chat app. The user is portraying ${activeCharacter.name}.`
-  );
-  pieces.push(
-    `You are ${contactCharacter.name}. Speak directly to ${activeCharacter.name} in chat.`
-  );
-  pieces.push("Do not speak as an assistant.");
-  pieces.push("Do not use markdown.");
-  pieces.push("Do not narrate actions, body language, lighting, or shared space.");
-  pieces.push("Do not use asterisks or roleplay stage directions.");
-  pieces.push("Keep the reply natural, direct, and suited for chat.");
-  pieces.push("Speak like a real person chatting, not like a system following rules.");
-  pieces.push(
-    "When answering about monsters, stay consistent with the same entity and do not switch to another."
-  );
-  pieces.push("After your text reply, the app may attach a GIF reaction.");
-  pieces.push("The GIF is only a mood accent.");
-  pieces.push("Do not overdescribe the GIF.");
-  pieces.push("If visual analysis confidently recognized a character, you may mention the name naturally.");
-  pieces.push("If visual analysis was uncertain, say you are not fully sure instead of guessing.");
-  pieces.push("If asked what the image or GIF is doing, describe only the visible action briefly.");
-  pieces.push("Do not invent weapon details unless the weapon is clearly visible.");
-  pieces.push("Do not base your entire reply on the visual.");
-  pieces.push(
-    "Do not infer deep lore, occupation, personality, or facts from the visual alone unless supported by context."
+    `Current live state: affinity=${runtimeState.affinity}, annoyance=${runtimeState.annoyance}, trust=${runtimeState.trust}, familiarity=${runtimeState.familiarity}, mood=${runtimeState.mood}, blocked=${runtimeState.blocked}.`
   );
 
-  if (contactCharacter.title) {
-    pieces.push(`${contactCharacter.name}'s title: ${contactCharacter.title}.`);
-  }
-
-  if (relationship) {
-    pieces.push(
-      `${contactCharacter.name}'s stored relationship toward ${activeCharacter.name}: ` +
-        `label=${relationship.relationship_label ?? "unspecified"}, ` +
-        `affinity=${relationship.affinity}, trust=${relationship.trust}, familiarity=${relationship.familiarity}.`
-    );
-
-    if (relationship.notes?.trim()) {
-      pieces.push(`Stored relationship notes: ${relationship.notes.trim()}`);
-    }
-  } else {
-    pieces.push(
-      `${contactCharacter.name} has no stored relationship entry toward ${activeCharacter.name}.`
-    );
-  }
-
-  pieces.push(
-    `Live thread state right now: affinity=${runtimeState.affinity}, annoyance=${runtimeState.annoyance}, trust=${runtimeState.trust}, familiarity=${runtimeState.familiarity}, mood=${runtimeState.mood}, blocked=${runtimeState.blocked}, message_count=${runtimeState.messageCount}.`
-  );
-
+  if (contactCharacter.title) pieces.push(`${contactCharacter.name} title: ${contactCharacter.title}.`);
+  if (factualContext.trim()) pieces.push(factualContext);
+  if (retrievedLoreContext.trim()) pieces.push(retrievedLoreContext);
   if (visualContext.trim()) pieces.push(visualContext);
   if (eventContext.trim()) pieces.push(eventContext);
   if (monsterContext.trim()) pieces.push(monsterContext);
@@ -1476,26 +1830,142 @@ export async function POST(req: Request) {
     const plannerRelationship = buildPlannerRelationshipState(nextRuntimeState);
     const history = buildHistory(updatedHistory);
 
+    const detectedCharacterName =
+      visionAnalysis?.recognizedCharacter ??
+      (visionAnalysis as any)?.possibleCharacter ??
+      null;
+
+    const detectedRelationship =
+      visualInput && detectedCharacterName
+        ? await findRelationshipWithDetectedCharacter({
+            supabase,
+            contactCharacterId: contactCharacter.id,
+            detectedCharacterName,
+          })
+        : null;
+
+    const explicitFactionName = detectFactionNameFromText(message);
+    const inferredFactionName = !explicitFactionName && isFactionFollowupQuestion(message)
+      ? inferFactionNameFromRecentHistory(updatedHistory)
+      : null;
+    const effectiveFactionName = explicitFactionName || inferredFactionName;
+    const effectiveMessage =
+      effectiveFactionName && inferredFactionName && !explicitFactionName
+        ? `${message} (${effectiveFactionName})`
+        : message;
+
+    let factualAnswer = await getDirectFactualAnswer(effectiveMessage, contactCharacter);
+
+    let forcedDirectReply: string | null = null;
+    let forcedFacts: string | null = null;
+
+    if (!factualAnswer.answered && effectiveFactionName && isFactionFollowupQuestion(message)) {
+      const factionRow = await fetchFactionByNameDirect({
+        supabase,
+        factionName: effectiveFactionName,
+      });
+      const members = parseFactionMembers(factionRow?.members);
+      if (factionRow && members.length) {
+        forcedFacts = `Question type: faction\nFaction: ${factionRow.name}\nMembers: ${members.join(", ")}`;
+        forcedDirectReply = buildFactionMembersReply({
+          factionName: factionRow.name,
+          members,
+        });
+        factualAnswer = {
+          answered: true,
+          kind: "faction",
+          facts: forcedFacts,
+          directReply: forcedDirectReply,
+          debug: {
+            route: "factual",
+            kind: "faction",
+            matched: { faction: factionRow.name },
+            facts: forcedFacts,
+            reply: forcedDirectReply,
+          },
+        };
+      }
+    }
+
+   if (!factualAnswer.answered && isRegionListQuestion(message)) {
+  console.log("\n[REGION DETECTED] message =", message);
+
+  const regionNames = await fetchAllRegionsDirect({ supabase });
+
+  console.log("[REGION FETCH RESULT] =", regionNames);
+
+  if (regionNames.length) {
+    forcedFacts = `Question type: region list\nRegions: ${regionNames.join(", ")}`;
+    forcedDirectReply = buildRegionListReply(regionNames);
+
+    console.log("[REGION FACTS BUILT] =", forcedFacts);
+    console.log("[REGION DIRECT REPLY] =", forcedDirectReply);
+
+    factualAnswer = {
+      answered: true,
+      kind: "region",
+      facts: forcedFacts,
+      directReply: forcedDirectReply,
+      debug: {
+        route: "factual",
+        kind: "region",
+        matched: { region: "Solaris-3" },
+        facts: forcedFacts,
+        reply: forcedDirectReply,
+      },
+    };
+  } else {
+    console.log("[REGION FETCH EMPTY ❌]");
+  }
+}
+
+    const loreResult =
+      factualAnswer.answered
+        ? { context: "", debug: null as any }
+        : await getLoreContextForCharacter(contactCharacter.key, effectiveMessage);
+
+    const needsEventContext = !factualAnswer.answered && shouldIncludeEventContext(message, visionAnalysis);
+    const needsMonsterContext = !factualAnswer.answered && shouldIncludeMonsterContext(message);
+
     const [events, monsters] = await Promise.all([
-      getRelevantEventsForCharacter({
-        characterKey: contactCharacter.key,
-        limit: 5,
-      }),
-      searchRelevantMonsters({
-        message,
-        limit: 5,
-      }),
+      needsEventContext
+        ? getRelevantEventsForCharacter({
+            characterKey: contactCharacter.key,
+            limit: 3,
+          })
+        : Promise.resolve([]),
+      needsMonsterContext
+        ? searchRelevantMonsters({
+            message,
+            limit: 3,
+          })
+        : Promise.resolve([]),
     ]);
 
-    const eventContext = buildEventContextBlock(events);
-    const monsterContext = buildMonsterContextBlock(monsters, message);
-    const visualContext = buildVisualContextBlock(visionAnalysis);
+    const factualContext = buildFactualContextBlock({
+  factual: factualAnswer,
+});
+
+console.log("\n[FACTUAL ANSWER FINAL] =", factualAnswer);
+console.log("[FACTUAL CONTEXT BLOCK] =", factualContext);
+    const retrievedLoreContext = loreResult.context || "";
+    const eventContext = needsEventContext ? buildEventContextBlock(events) : "";
+    const monsterContext = needsMonsterContext ? buildMonsterContextBlock(monsters, message) : "";
+    const visualContext = visualInput
+      ? buildVisualContextBlock({
+          vision: visionAnalysis,
+          activeCharacter,
+          contactCharacter,
+          detectedRelationship,
+        })
+      : "";
 
     const worldContext = buildWorldContext({
       activeCharacter,
       contactCharacter,
-      relationship,
       runtimeState: nextRuntimeState,
+      factualContext,
+      retrievedLoreContext,
       eventContext,
       monsterContext,
       visualContext,
@@ -1503,7 +1973,7 @@ export async function POST(req: Request) {
 
     const { plan, prompt, memorySummary, modelSettings } =
       createReplyPlannerPrompt({
-        message,
+        message: effectiveMessage,
         history,
         relationship: plannerRelationship,
         character: plannerCharacter,
@@ -1518,14 +1988,20 @@ export async function POST(req: Request) {
       });
 
     const model = DEFAULT_MODEL;
+    const factualAwareTemperature = factualAnswer.answered
+      ? Math.min(modelSettings.temperature, 0.55)
+      : modelSettings.temperature;
+    const factualAwareMaxTokens = factualAnswer.answered
+      ? Math.max(modelSettings.maxTokens, 140)
+      : modelSettings.maxTokens;
 
     const firstPass = await callDeepSeek({
       apiKey,
       model,
       prompt,
-      temperature: modelSettings.temperature,
+      temperature: factualAwareTemperature,
       topP: modelSettings.topP,
-      maxTokens: modelSettings.maxTokens,
+      maxTokens: factualAwareMaxTokens,
     });
 
     logTokenUsage({
@@ -1547,15 +2023,17 @@ export async function POST(req: Request) {
     }
 
     let reply = firstPass.reply;
+    console.log("\n[MODEL RAW REPLY BEFORE FIX] =", reply);
     let repaired = false;
     let repairUsage: OpenRouterResponse["usage"] | undefined;
 
-    if (isWeakCharacterReply(reply)) {
+    if (isWeakCharacterReply(reply) || (visualInput && replyDeniesSeenCharacter(reply))) {
       const repairPrompt = buildRepairPrompt({
-        originalPrompt: prompt,
         badReply: reply,
         plan,
         character: plannerCharacter,
+        userMessage: message,
+        visualContext,
       });
 
       const secondPass = await callDeepSeek({
@@ -1588,6 +2066,9 @@ export async function POST(req: Request) {
       }
     }
 
+  if (factualAnswer.answered && shouldLockDirectFactualReply(factualAnswer) && factualAnswer.directReply) {
+  reply = factualAnswer.directReply;
+}
     logCombinedTokenUsage({
       model,
       threadId,
@@ -1730,6 +2211,15 @@ export async function POST(req: Request) {
         activeCharacter: activeCharacter.name,
         contactCharacter: contactCharacter.name,
         vision: visionAnalysis,
+        includedContext: {
+          factual: factualAnswer.answered,
+          lore: !!retrievedLoreContext,
+          events: needsEventContext,
+          monsters: needsMonsterContext,
+          visual: !!visualInput,
+        },
+        factual: factualAnswer.answered ? factualAnswer.debug : null,
+        lore: loreResult.debug ?? null,
         events: events.map((e) => ({
           title: e.title,
           importance: e.importance,

@@ -112,6 +112,7 @@ type VisionAnalysis = {
   possibleCharacter?: string | null;
   series: string | null;
   action: string | null;
+  expression: string | null;
   confidence: "high" | "medium" | "low";
   conciseSummary: string | null;
   rawText: string | null;
@@ -124,7 +125,7 @@ const DEFAULT_OPENAI_VISION_MODEL =
   process.env.OPENAI_VISION_MODEL || "gpt-4.1";
 
 const MAX_HISTORY = 18;
-const DUPLICATE_GIF_WINDOW_MS = 45_000;
+const DUPLICATE_GIF_WINDOW_MS = 180_000;
 
 const WATERMARK_TOKENS = [
   "tybwaizen",
@@ -310,6 +311,10 @@ function normalizeVisionAnalysis(
       typeof input?.action === "string" && input.action.trim()
         ? input.action.trim()
         : null,
+    expression:
+      typeof (input as any)?.expression === "string" && (input as any).expression.trim()
+        ? (input as any).expression.trim()
+        : null,
     confidence,
     conciseSummary:
       typeof input?.conciseSummary === "string" && input.conciseSummary.trim()
@@ -361,29 +366,60 @@ function scrubReplyWatermarks(reply: string) {
   return cleaned;
 }
 
-function doesVisionLikelyMatchActiveCharacter(args: {
-  activeCharacter: CharacterRow;
+function stripSeriesMentionFromReply(reply: string) {
+  let cleaned = reply;
+
+  cleaned = cleaned.replace(
+    /\b(it('| i)?s|that('| i)?s|this is|this looks like|looks like)\s+(from\s+)?wuthering\s+waves\b[,.!?]*/gi,
+    ""
+  );
+
+  cleaned = cleaned.replace(/\bfrom\s+wuthering\s+waves\b[,.!?]*/gi, "");
+  cleaned = cleaned.replace(/\bwuthering\s+waves\b[,.!?]*/gi, "");
+  cleaned = cleaned.replace(/\s{2,}/g, " ").trim();
+  cleaned = cleaned.replace(/^[,.\-:;\s]+/, "").trim();
+
+  if (!cleaned) return "An interesting choice.";
+
+  return cleaned;
+}
+
+function replyDeniesSeenCharacter(reply: string) {
+  const text = normalizeLoose(reply);
+
+  return (
+    text.includes("that is not me") ||
+    text.includes("that's not me") ||
+    text.includes("that isn't me") ||
+    text.includes("that is not mine") ||
+    text.includes("not me.") ||
+    text === "not me"
+  );
+}
+
+function doesVisionLikelyMatchCharacter(args: {
+  character: CharacterRow;
   vision: VisionAnalysis | null;
   searchQuery?: string | null;
 }) {
-  const { activeCharacter, vision, searchQuery } = args;
+  const { character, vision, searchQuery } = args;
   if (!vision) return false;
 
-  const activeName = normalizeLoose(activeCharacter.name);
+  const characterName = normalizeLoose(character.name);
   const recognized = normalizeLoose(vision.recognizedCharacter);
   const possible = normalizeLoose(vision.possibleCharacter);
   const search = normalizeSearchText(searchQuery);
 
-  if (recognized && recognized === activeName) return true;
-  if (possible && possible === activeName) return true;
-  if (search && isStrongCharacterSearchMatch(search, activeName)) return true;
+  if (recognized && recognized === characterName) return true;
+  if (possible && possible === characterName) return true;
+  if (search && isStrongCharacterSearchMatch(search, characterName)) return true;
 
   if (
     vision.series === "Wuthering Waves" &&
     !recognized &&
     !possible &&
     search &&
-    isPrefixMatch(search, activeName) &&
+    isPrefixMatch(search, characterName) &&
     !isBroadSearchQuery(search)
   ) {
     return true;
@@ -392,9 +428,8 @@ function doesVisionLikelyMatchActiveCharacter(args: {
   if (
     vision.series === "Wuthering Waves" &&
     possible &&
-    activeName.includes("phrolova") &&
     search &&
-    isPrefixMatch(search, activeName) &&
+    isPrefixMatch(search, characterName) &&
     !isBroadSearchQuery(search)
   ) {
     return true;
@@ -403,20 +438,47 @@ function doesVisionLikelyMatchActiveCharacter(args: {
   return false;
 }
 
+function doesVisionLikelyMatchActiveCharacter(args: {
+  activeCharacter: CharacterRow;
+  vision: VisionAnalysis | null;
+  searchQuery?: string | null;
+}) {
+  return doesVisionLikelyMatchCharacter({
+    character: args.activeCharacter,
+    vision: args.vision,
+    searchQuery: args.searchQuery,
+  });
+}
+
+function doesVisionLikelyMatchContactCharacter(args: {
+  contactCharacter: CharacterRow;
+  vision: VisionAnalysis | null;
+  searchQuery?: string | null;
+}) {
+  return doesVisionLikelyMatchCharacter({
+    character: args.contactCharacter,
+    vision: args.vision,
+    searchQuery: args.searchQuery,
+  });
+}
+
 function buildOtherCharacterLead(args: {
   vision: VisionAnalysis | null;
   activeCharacter: CharacterRow;
+  contactCharacter: CharacterRow;
 }) {
-  const { vision, activeCharacter } = args;
+  const { vision, activeCharacter, contactCharacter } = args;
   if (!vision) return null;
 
   const activeName = normalizeLoose(activeCharacter.name);
+  const contactName = normalizeLoose(contactCharacter.name);
   const recognized = normalizeLoose(vision.recognizedCharacter);
   const possible = normalizeLoose(vision.possibleCharacter);
 
   if (
     recognized &&
     recognized !== activeName &&
+    recognized !== contactName &&
     !isLikelyWatermarkToken(vision.recognizedCharacter)
   ) {
     return `${vision.recognizedCharacter}, then.`;
@@ -425,6 +487,7 @@ function buildOtherCharacterLead(args: {
   if (
     possible &&
     possible !== activeName &&
+    possible !== contactName &&
     !isGenericPossibleCharacter(possible) &&
     !isLikelyWatermarkToken(vision.possibleCharacter)
   ) {
@@ -524,9 +587,19 @@ function buildVisualContextBlock(args: {
   vision: VisionAnalysis | null;
   searchQuery: string | null;
   activeCharacter: CharacterRow;
+  contactCharacter: CharacterRow;
   shouldTreatAsActiveCharacter: boolean;
+  shouldTreatAsContactCharacter: boolean;
 }) {
-  const { vision, searchQuery, activeCharacter, shouldTreatAsActiveCharacter } = args;
+  // Action-aware prompting for GIF replies.
+  const {
+    vision,
+    searchQuery,
+    activeCharacter,
+    contactCharacter,
+    shouldTreatAsActiveCharacter,
+    shouldTreatAsContactCharacter,
+  } = args;
   if (!vision || !vision.hasVisual) return "";
 
   const pieces: string[] = [];
@@ -534,21 +607,18 @@ function buildVisualContextBlock(args: {
   pieces.push(`Visual medium: ${vision.medium}.`);
   pieces.push(`Visual confidence: ${vision.confidence}.`);
 
-  if (vision.series) {
-    pieces.push(`Detected series: ${vision.series}.`);
-  }
-
   if (searchQuery?.trim()) {
     pieces.push(`The user selected this GIF from search query: ${searchQuery.trim()}.`);
   }
 
   if (shouldTreatAsActiveCharacter) {
-    pieces.push(
-      `The attached GIF likely depicts ${activeCharacter.name}, the user-portrayed character in this thread.`
-    );
-    pieces.push(
-      "Treat the GIF as the user showing themself, not as a third-party identification request."
-    );
+    pieces.push(`The attached GIF depicts ${activeCharacter.name}.`);
+    pieces.push("Treat the GIF as the user showing themself.");
+    pieces.push("Do not deny it.");
+  } else if (shouldTreatAsContactCharacter) {
+    pieces.push(`The attached GIF depicts you, ${contactCharacter.name}.`);
+    pieces.push("Acknowledge it in first person.");
+    pieces.push("Do not deny that it is you.");
   } else if (vision.recognizedCharacter) {
     pieces.push(`Recognized character: ${vision.recognizedCharacter}.`);
   } else if (vision.possibleCharacter) {
@@ -561,18 +631,29 @@ function buildVisualContextBlock(args: {
     pieces.push(`Visible action: ${vision.action}.`);
   }
 
+  if (vision.expression) {
+    pieces.push(`Visible expression or vibe: ${vision.expression}.`);
+  }
+
   pieces.push("Ignore watermark text, editor handles, usernames, source tags, and overlay credits inside the image.");
   pieces.push("Never use watermark text or GIF metadata as a character name.");
   pieces.push("Do not answer like a classifier.");
   pieces.push("Do not explain the visual like a captioning system.");
+  pieces.push("Do not mention the franchise, series, or game title unless the user explicitly asks what it is from.");
 
   if (shouldTreatAsActiveCharacter) {
-    pieces.push("If this is likely the active character, acknowledge it naturally as 'you' or by name.");
+    pieces.push("Acknowledge the user naturally as 'you' or by name.");
+    pieces.push("If a visible action exists, briefly react to what they are doing or how they look in the GIF.");
+  } else if (shouldTreatAsContactCharacter) {
+    pieces.push("Acknowledge yourself naturally and briefly in first person.");
+    pieces.push("If a visible action exists, briefly react in first person to what you are doing in the GIF.");
   } else {
     pieces.push("If this is likely some other character, acknowledge that character naturally and briefly.");
     pieces.push("Do not pretend that another character is the user.");
+    pieces.push("If a visible action exists, mention what that character is doing in one short natural clause.");
   }
 
+  pieces.push("Use the action as conversational awareness, not as a long description.");
   pieces.push("Keep the acknowledgment short and relational.");
   pieces.push("Then continue with the real in-character reply.");
 
@@ -596,6 +677,7 @@ function buildWorldContext(args: {
   monsterContext: string;
   visualContext: string;
   shouldTreatAsActiveCharacter: boolean;
+  shouldTreatAsContactCharacter: boolean;
 }) {
   const {
     activeCharacter,
@@ -606,6 +688,7 @@ function buildWorldContext(args: {
     monsterContext,
     visualContext,
     shouldTreatAsActiveCharacter,
+    shouldTreatAsContactCharacter,
   } = args;
 
   const pieces: string[] = [];
@@ -621,21 +704,30 @@ function buildWorldContext(args: {
   pieces.push("Do not narrate actions or roleplay stage directions.");
   pieces.push("Keep the reply natural, direct, and suited for chat.");
   pieces.push("The user's latest message was a GIF.");
+  pieces.push("Never mention the franchise, series, or game title unless the user explicitly asks.");
 
   if (shouldTreatAsActiveCharacter) {
-    pieces.push("The GIF likely shows the user themself in their portrayed form.");
+    pieces.push("The GIF shows the user themself in their portrayed form.");
     pieces.push("Do not identify them as if they were a separate third person.");
     pieces.push("Acknowledge them briefly and relationally.");
+    pieces.push("If the GIF has a visible action or expression, react to that naturally.");
+  } else if (shouldTreatAsContactCharacter) {
+    pieces.push(`The GIF shows you, ${contactCharacter.name}.`);
+    pieces.push("Acknowledge it naturally in first person.");
+    pieces.push("Do not deny that it is you.");
+    pieces.push("If the GIF has a visible action or expression, briefly react to what you are doing.");
   } else {
     pieces.push("The GIF likely shows another character, not the user.");
     pieces.push("If a likely character is available from vision, acknowledge them briefly and naturally.");
     pieces.push("Then respond relationally to why the user chose that character.");
+    pieces.push("If a visible action or expression exists, mention it naturally so you show awareness of the GIF.");
     pieces.push("Never use GIF title metadata, watermark text, usernames, editor tags, or overlay credits as if they were character names.");
     pieces.push("If the image contains visible watermark text like a creator handle, ignore it completely.");
   }
 
   pieces.push("Do not over-describe the GIF.");
   pieces.push("Do not respond like a vision captioner.");
+  pieces.push("One short mention of the visible action is enough.");
 
   if (contactCharacter.title) {
     pieces.push(`${contactCharacter.name}'s title: ${contactCharacter.title}.`);
@@ -981,6 +1073,38 @@ async function insertGifMessage(args: {
   return normalized;
 }
 
+
+function buildIdentityRepairPrompt(args: {
+  originalPrompt: string;
+  badReply: string;
+  contactCharacter: CharacterRow;
+  activeCharacter: CharacterRow;
+  shouldTreatAsActiveCharacter: boolean;
+  shouldTreatAsContactCharacter: boolean;
+}) {
+  const { originalPrompt, badReply, contactCharacter, activeCharacter, shouldTreatAsActiveCharacter, shouldTreatAsContactCharacter } = args;
+
+  const correction = shouldTreatAsActiveCharacter
+    ? `The GIF depicts ${activeCharacter.name}, the user. Do not deny that.`
+    : shouldTreatAsContactCharacter
+    ? `The GIF depicts you, ${contactCharacter.name}. Speak in first person and do not deny that it is you.`
+    : "Keep the identity handling natural and grounded.";
+
+  return `
+Rewrite the reply so it stays fully in character and natural.
+
+${correction}
+
+Bad reply:
+${badReply}
+
+Return only the rewritten final chat reply.
+
+Original instructions:
+${originalPrompt}
+`.trim();
+}
+
 async function callDeepSeek(args: {
   apiKey: string;
   model: string;
@@ -1033,6 +1157,7 @@ Return STRICT JSON only with this exact shape:
   "possibleCharacter": string | null,
   "series": string | null,
   "action": string | null,
+  "expression": string | null,
   "confidence": "high" | "medium" | "low",
   "conciseSummary": string | null
 }
@@ -1046,7 +1171,8 @@ Rules:
 - Never treat watermark text or creator names as character identities.
 - Do not invent a weapon unless clearly visible.
 - Do not invent lore, role, or personality.
-- "action" should be a short visible-action phrase.
+- "action" should be a short visible-action phrase like "glancing aside", "smiling faintly", "raising a weapon", or "turning away".
+- "expression" should be a very short mood/expression phrase like "calm", "smug", "melancholic", or "watchful" when visible.
 - "conciseSummary" must be brief and visual-only.
 `.trim();
 
@@ -1113,6 +1239,7 @@ Rules:
     possibleCharacter: null,
     series: null,
     action: null,
+    expression: null,
     confidence: "low",
     conciseSummary: null,
   });
@@ -1495,6 +1622,12 @@ export async function POST(req: Request) {
       searchQuery,
     });
 
+    const shouldTreatAsContactCharacter = doesVisionLikelyMatchContactCharacter({
+      contactCharacter,
+      vision: visionAnalysis,
+      searchQuery,
+    });
+
     const updatedHistory = [...messages, savedGifMessage].slice(-MAX_HISTORY);
 
     const plannerCharacter = mapDbCharacterToPlannerProfile(contactCharacter);
@@ -1518,7 +1651,9 @@ export async function POST(req: Request) {
       vision: visionAnalysis,
       searchQuery,
       activeCharacter,
+      contactCharacter,
       shouldTreatAsActiveCharacter,
+      shouldTreatAsContactCharacter,
     });
 
     console.log("[vision-context-block]", visualContext || "(empty)");
@@ -1532,6 +1667,7 @@ export async function POST(req: Request) {
       monsterContext,
       visualContext,
       shouldTreatAsActiveCharacter,
+      shouldTreatAsContactCharacter,
     });
 
     const { plan, prompt, memorySummary, modelSettings } =
@@ -1585,10 +1721,11 @@ export async function POST(req: Request) {
 
     if (isWeakCharacterReply(reply)) {
       const repairPrompt = buildRepairPrompt({
-        originalPrompt: prompt,
         badReply: reply,
         plan,
         character: plannerCharacter,
+        userMessage: messageForState,
+        visualContext,
       });
 
       const secondPass = await callDeepSeek({
@@ -1621,9 +1758,40 @@ export async function POST(req: Request) {
       }
     }
 
+    if (
+      (shouldTreatAsActiveCharacter || shouldTreatAsContactCharacter) &&
+      replyDeniesSeenCharacter(reply)
+    ) {
+      const identityRepairPrompt = buildIdentityRepairPrompt({
+        originalPrompt: prompt,
+        badReply: reply,
+        contactCharacter,
+        activeCharacter,
+        shouldTreatAsActiveCharacter,
+        shouldTreatAsContactCharacter,
+      });
+
+      const identityRepairPass = await callDeepSeek({
+        apiKey,
+        model,
+        prompt: identityRepairPrompt,
+        temperature: Math.min(modelSettings.temperature + 0.04, 0.88),
+        topP: modelSettings.topP,
+        maxTokens: modelSettings.maxTokens,
+      });
+
+      if (identityRepairPass.response.ok && identityRepairPass.reply) {
+        reply = identityRepairPass.reply;
+        repaired = true;
+      } else {
+        console.error("[deepseek-error:identity-repair]", identityRepairPass.data);
+      }
+    }
+
     const otherCharacterLead = buildOtherCharacterLead({
       vision: visionAnalysis,
       activeCharacter,
+      contactCharacter,
     });
 
     if (!shouldTreatAsActiveCharacter && otherCharacterLead) {
@@ -1636,6 +1804,7 @@ export async function POST(req: Request) {
     }
 
     reply = scrubReplyWatermarks(reply);
+    reply = stripSeriesMentionFromReply(reply);
 
     logCombinedTokenUsage({
       model,
@@ -1653,6 +1822,7 @@ export async function POST(req: Request) {
       action: visionAnalysis?.action ?? null,
       confidence: visionAnalysis?.confidence ?? null,
       shouldTreatAsActiveCharacter,
+      shouldTreatAsContactCharacter,
       safeGifTitle,
       finalReplyPreview: reply.slice(0, 220),
     });
@@ -1713,6 +1883,7 @@ export async function POST(req: Request) {
         modelSettings,
         vision: visionAnalysis,
         shouldTreatAsActiveCharacter,
+        shouldTreatAsContactCharacter,
         safeGifTitle,
         otherCharacterLead,
       },

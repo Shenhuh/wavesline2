@@ -44,9 +44,23 @@ function cleanTextBlock(text?: string | null) {
   return (text ?? "").trim();
 }
 
+function trimBlock(text: string, maxChars: number) {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, maxChars - 1).trim()}…`;
+}
+
 const VISUALIZATION_TRIGGERS = [
-  "visualize", "visualise", "diagram", "draw me", "draw a",
-  "chart", "graph", "show me a", "plot", "sketch",
+  "visualize",
+  "visualise",
+  "diagram",
+  "draw me",
+  "draw a",
+  "chart",
+  "graph",
+  "show me a",
+  "plot",
+  "sketch",
 ];
 
 export function isVisualizationRequest(message: string): boolean {
@@ -94,7 +108,7 @@ function getRelationshipModifiers(
     }
 
     if (familiarity >= 75) {
-      behaviorBits.push("speaks with more ease and natural shorthand");
+      behaviorBits.push("speaks with more ease and shorthand");
       styleBits.push("slightly less formal");
     } else if (familiarity <= 25) {
       behaviorBits.push("keeps more formality and distance");
@@ -129,7 +143,6 @@ function buildRelationshipInfluenceBlock(
     `- Behavior shift: ${mods.behaviorModifier}`,
     `- Style shift: ${mods.styleModifier}`,
     "- Let these shifts subtly influence the reply.",
-    "- Do not mention these rules directly.",
   ].join("\n");
 }
 
@@ -138,19 +151,19 @@ function buildExtendedCharacterContextBlock(
 ): string {
   if (!extra) return "";
 
-  const identityNotes = cleanTextBlock(extra.identityNotes);
-  const conversationRules = cleanTextBlock(extra.conversationRules);
-  const relationshipBehavior = cleanTextBlock(extra.relationshipBehavior);
-  const loreContext = cleanTextBlock(extra.loreContext);
-  const hardConstraints = cleanTextBlock(extra.hardConstraints);
-
   const sections: string[] = [];
 
-  if (identityNotes) sections.push(`CHARACTER IDENTITY\n${identityNotes}`);
-  if (conversationRules) sections.push(`CONVERSATION RULES\n${conversationRules}`);
-  if (relationshipBehavior) sections.push(`RELATIONSHIP BEHAVIOR\n${relationshipBehavior}`);
-  if (loreContext) sections.push(`LORE CONTEXT\n${loreContext}`);
-  if (hardConstraints) sections.push(`HARD CONSTRAINTS\n${hardConstraints}`);
+  const identityNotes = trimBlock(cleanTextBlock(extra.identityNotes), 320);
+  const conversationRules = trimBlock(cleanTextBlock(extra.conversationRules), 260);
+  const relationshipBehavior = trimBlock(cleanTextBlock(extra.relationshipBehavior), 220);
+  const loreContext = trimBlock(cleanTextBlock(extra.loreContext), 320);
+  const hardConstraints = trimBlock(cleanTextBlock(extra.hardConstraints), 220);
+
+  if (identityNotes) sections.push(`IDENTITY\n${identityNotes}`);
+  if (conversationRules) sections.push(`RULES\n${conversationRules}`);
+  if (relationshipBehavior) sections.push(`RELATIONSHIP\n${relationshipBehavior}`);
+  if (loreContext) sections.push(`LORE\n${loreContext}`);
+  if (hardConstraints) sections.push(`CONSTRAINTS\n${hardConstraints}`);
 
   return sections.join("\n\n");
 }
@@ -159,16 +172,15 @@ export function chooseModelSettings(
   plan: ReplyPlan,
   isViz: boolean = false
 ): OrchestratorModelSettings {
-  // Visualization requests need much more tokens for SVG output
   if (isViz) {
     return {
       temperature: 0.4,
-      maxTokens: 1800,
+      maxTokens: 1400,
       topP: 0.9,
     };
   }
 
-  let temperature = 0.68;
+  let temperature = 0.66;
   let topP = 0.9;
 
   if (plan.intent === "lore") {
@@ -178,51 +190,31 @@ export function chooseModelSettings(
 
   if (plan.intent === "combat") {
     temperature = 0.56;
-    topP = 0.9;
   }
 
   if (plan.mode === "comfort") {
-    temperature = 0.52;
+    temperature = 0.5;
     topP = 0.88;
   }
 
-  if (plan.mode === "question_back") {
-    temperature = 0.66;
-  }
-
-  if (plan.mode === "tease_then_answer") {
-    temperature = 0.78;
-  }
-
-  if (plan.mode === "challenge") {
-    temperature = 0.82;
-  }
-
-  if (plan.mode === "guarded_answer") {
-    temperature = 0.75;
-  }
-
-  if (plan.tone === "guarded" && plan.pressure === "low") {
-    temperature += 0.04;
-  }
+  if (plan.mode === "tease_then_answer") temperature = 0.76;
+  if (plan.mode === "challenge") temperature = 0.8;
+  if (plan.mode === "guarded_answer") temperature = 0.72;
+  if (plan.mode === "question_back") temperature = 0.64;
 
   if (plan.userEmotion === "aggressive") {
-    temperature = Math.max(temperature, 0.8);
+    temperature = Math.max(temperature, 0.76);
   }
 
   if (plan.pressure === "high") {
-    temperature = Math.min(temperature, 0.58);
-  }
-
-  if (plan.length === "long") {
-    temperature += 0.03;
+    temperature = Math.min(temperature, 0.56);
   }
 
   const maxTokens =
-    plan.length === "short" ? 80 : plan.length === "medium" ? 140 : 240;
+    plan.length === "short" ? 70 : plan.length === "medium" ? 120 : 190;
 
   return {
-    temperature: clamp(temperature, 0.35, 0.9),
+    temperature: clamp(temperature, 0.35, 0.88),
     maxTokens,
     topP: clamp(topP, 0.7, 1),
   };
@@ -255,13 +247,15 @@ export function createReplyPlannerPrompt(args: {
   });
 
   const isViz = isVisualizationRequest(message);
-
-  const memorySummary = buildLightMemorySummary(history, runtimeMemory);
-  const relationshipInfluence = buildRelationshipInfluenceBlock(relationship);
+  const memorySummary = trimBlock(buildLightMemorySummary(history, runtimeMemory), 320);
+  const relationshipInfluence = trimBlock(
+    buildRelationshipInfluenceBlock(relationship),
+    260
+  );
   const characterContextBlock = buildExtendedCharacterContextBlock(extraCharacterContext);
 
   const mergedWorldContext = [
-    cleanTextBlock(worldContext),
+    trimBlock(cleanTextBlock(worldContext), 900),
     characterContextBlock,
     relationshipInfluence,
   ]
@@ -298,10 +292,7 @@ export function isWeakCharacterReply(replyRaw: string): boolean {
 
   if (!reply) return true;
   if (reply.length < 18) return true;
-
-  // Don't flag visualization responses as weak — they're intentionally long
   if (reply.includes("<visualization>") || reply.includes("<svg")) return false;
-
   if (reply.length > 650) return true;
 
   const bannedPatterns = [
@@ -322,69 +313,64 @@ export function isWeakCharacterReply(replyRaw: string): boolean {
   if (bannedPatterns.some((pattern) => lower.includes(pattern))) return true;
 
   const stageDirectionPatterns = [
-    "*", "i tilt my head", "tilt my head slightly", "i step closer",
-    "leans closer", "i watch you", "i study you", "studying you",
-    "a slow smile", "smile curls", "my lips", "my eyes", "my gaze",
-    "my expression", "my smile", "crosses my features", "the dim light",
-    "the room", "between us", "the silence between us", "silence settles",
-    "hangs in the air", "fills the space", "in the air", "sit with it",
-    "let it settle", "settle in the air",
+    "*",
+    "i tilt my head",
+    "i step closer",
+    "leans closer",
+    "a slow smile",
+    "my gaze",
+    "the room",
+    "between us",
+    "hangs in the air",
+    "sit with it",
   ];
 
   if (stageDirectionPatterns.some((pattern) => lower.includes(pattern))) return true;
 
   const therapistPatterns = [
-    "that kind of sadness", "doesn't always need a reason",
-    "it doesn't have to", "would you rather", "would it help to talk",
-    "what brought it to the surface", "you don't have to explain it",
+    "that kind of sadness",
+    "doesn't always need a reason",
+    "would it help to talk",
+    "you don't have to explain it",
   ];
 
   if (therapistPatterns.some((p) => lower.includes(p))) return true;
 
   const badStarts = ["sometimes", "it can be", "it's normal", "sadness", "the feeling"];
-
   if (badStarts.some((s) => lower.startsWith(s))) return true;
 
   return false;
 }
 
 export function buildRepairPrompt(args: {
-  originalPrompt: string;
   badReply: string;
   plan: ReplyPlan;
   character: CharacterPlannerProfile;
+  userMessage?: string;
+  visualContext?: string;
 }): string {
-  const { originalPrompt, badReply, plan, character } = args;
+  const { badReply, plan, character, userMessage, visualContext } = args;
+
+  const visual = trimBlock(cleanTextBlock(visualContext), 280);
+  const user = trimBlock(cleanTextBlock(userMessage), 180);
 
   return `
-${originalPrompt}
+You are ${character.name}. Rewrite the bad reply into a stronger in-character chat reply.
 
-PREVIOUS OUTPUT FAILED
-The previous reply did not follow the intended style strongly enough.
-
-BAD OUTPUT
+Bad reply:
 ${badReply}
 
-REPAIR INSTRUCTIONS
-- Rewrite the reply from scratch.
-- Stay fully in character as ${character.name}.
-- Follow the reply plan more strictly.
-- If database facts are present in the prompt, prefer them over inference.
-- Do not sound like an assistant.
-- Do not use generic empathy phrases.
-- Do not mention AI, policies, or limitations.
-- Do not narrate physical movement, facial expressions, lighting, or body language.
-- Do not use stage-direction prose.
-- Do not use metaphor that implies physical presence or shared space.
-- Avoid phrasing like "sit with it", "let it settle", "hangs in the air", "between us", or "in the room".
-- Do not sound like a therapist or counselor.
-- Keep responses short, reactive, and conversational.
-- Prefer simple phrasing over complex sentences.
-- Limit to 2-4 sentences maximum.
-- Keep the reply clearly suited to text chat.
-- Make the tone more consistent with: ${plan.tone}.
-- Make the mode more consistent with: ${plan.mode}.
-- Keep the response length consistent with: ${plan.length}.
-- Output only the corrected in-character reply.
+User message:
+${user || "(not provided)"}
+
+${visual ? `Useful context:\n${visual}\n` : ""}Rules:
+- Stay fully in character.
+- Sound like a real chat message, not an assistant.
+- Keep it ${plan.length === "short" ? "very brief" : "brief"}.
+- Match tone=${plan.tone}, mode=${plan.mode}.
+- No markdown, no stage directions, no AI disclaimers.
+- Do not mention franchise names unless asked.
+- Use clear visual/action context naturally when relevant.
+- Output only the corrected reply.
 `.trim();
 }

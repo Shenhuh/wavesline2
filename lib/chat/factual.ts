@@ -2,6 +2,15 @@ import "server-only";
 
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
+export type FactualCharacterRow = {
+  id: string;
+  key: string;
+  name: string;
+  title?: string | null;
+  identity_notes?: string | null;
+  lore_context?: string | null;
+};
+
 type MonsterRow = {
   name: string;
   element: string | null;
@@ -32,13 +41,21 @@ type LoreEntryRow = {
 
 export type FactualAnswerDebug = {
   route: "factual";
-  kind: "monster_list" | "region" | "faction" | "lore_entry";
+  kind:
+    | "identity"
+    | "monster_list"
+    | "region"
+    | "region_list"
+    | "faction"
+    | "faction_members"
+    | "lore_entry";
   matched: {
     region?: string | null;
     faction?: string | null;
     loreEntryKey?: string | null;
     monsterNames?: string[];
     requestedCount?: number | null;
+    character?: string | null;
   };
   facts: string;
   reply?: string;
@@ -53,12 +70,13 @@ export type FactualAnswerResult =
           region?: string | null;
           faction?: string | null;
           loreEntryKey?: string | null;
+          character?: string | null;
         };
       };
     }
   | {
       answered: true;
-      kind: "monster_list" | "region" | "faction" | "lore_entry";
+      kind: FactualAnswerDebug["kind"];
       facts: string;
       directReply?: string;
       debug: FactualAnswerDebug;
@@ -76,13 +94,33 @@ function trimMarkdownNoise(text: string) {
   return text
     .replace(/#{1,6}\s*/g, "")
     .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .replace(/\r/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
+function cleanFactSentence(text: string) {
+  return text
+    .replace(/\b(in|from)\s+Wuthering\s+Waves\b/gi, "")
+    .replace(/\bWuthering\s+Waves\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .trim();
+}
+
+function firstUsefulSentence(text: string | null | undefined) {
+  const raw = cleanFactSentence(trimMarkdownNoise(String(text ?? "")));
+  if (!raw) return "";
+  const parts = raw
+    .split(/(?<=[.!?])\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return parts[0] ?? raw;
+}
+
 function detectRegion(message: string) {
   const text = normalize(message);
-
   const map: Record<string, string> = {
     huanglong: "Huanglong",
     rinascita: "Rinascita",
@@ -93,19 +131,14 @@ function detectRegion(message: string) {
     roi: "Lahai-Roi",
     "black shores": "Black Shores",
   };
-
   for (const [keyword, regionName] of Object.entries(map)) {
-    if (text.includes(keyword)) {
-      return regionName;
-    }
+    if (text.includes(keyword)) return regionName;
   }
-
   return null;
 }
 
 function detectFaction(message: string) {
   const text = normalize(message);
-
   const map: Record<string, string> = {
     fractsidus: "Fractsidus",
     "order of the deep": "Order of the Deep",
@@ -116,182 +149,114 @@ function detectFaction(message: string) {
     montelli: "Montelli Family",
     "black shores": "Black Shores",
   };
-
   for (const [keyword, factionName] of Object.entries(map)) {
-    if (text.includes(keyword)) {
-      return factionName;
-    }
+    if (text.includes(keyword)) return factionName;
   }
-
   return null;
 }
 
 function detectLoreEntryKey(message: string) {
   const text = normalize(message);
-
-  if (
-    includesAny(text, [
-      "tacet discord",
-      "tacet discords",
-      "creature",
-      "creatures",
-      "discord",
-      "discords",
-    ])
-  ) {
+  if (includesAny(text, ["tacet discord", "tacet discords", "creature", "creatures", "discord", "discords"])) {
     return "CREATURES_LORE";
   }
-
-  if (
-    includesAny(text, [
-      "world",
-      "solaris",
-      "solaris-3",
-      "solar 3",
-      "lament",
-    ])
-  ) {
+  if (includesAny(text, ["world", "solaris", "solaris-3", "solar 3", "lament"])) {
     return "WORLD_LORE";
   }
-
   return null;
 }
 
 function detectRequestedMonsterCount(message: string) {
   const text = normalize(message);
-
   const numericMatch = text.match(/\b(\d+)\b/);
   if (numericMatch) {
     const count = Number(numericMatch[1]);
-    if (Number.isFinite(count) && count > 0) {
-      return Math.min(count, 10);
-    }
+    if (Number.isFinite(count) && count > 0) return Math.min(count, 10);
   }
-
-  const wordMap: Record<string, number> = {
-    one: 1,
-    two: 2,
-    three: 3,
-    four: 4,
-    five: 5,
-    six: 6,
-    seven: 7,
-    eight: 8,
-    nine: 9,
-    ten: 10,
-  };
-
-  for (const [word, value] of Object.entries(wordMap)) {
-    if (text.includes(word)) {
-      return value;
-    }
-  }
-
-  if (
-    includesAny(text, [
-      "some",
-      "several",
-      "few",
-      "examples",
-      "tell me some",
-      "show me",
-    ])
-  ) {
-    return 5;
-  }
-
+  if (includesAny(text, ["some", "several", "few", "examples", "tell me some", "show me"])) return 5;
   return null;
+}
+
+function isIdentityQuestion(message: string) {
+  const text = normalize(message);
+  return includesAny(text, [
+    "who are you",
+    "what are you",
+    "tell me about yourself",
+    "introduce yourself",
+    "who exactly are you",
+    "what should i call you",
+  ]);
 }
 
 function isMonsterQuestion(message: string) {
   const text = normalize(message);
-
-  return includesAny(text, [
-    "monster",
-    "monsters",
-    "enemy",
-    "enemies",
-    "creature",
-    "creatures",
-    "tacet discord",
-    "tacet discords",
-    "discord",
-    "discords",
-  ]);
+  return includesAny(text, ["monster", "monsters", "enemy", "enemies", "creature", "creatures", "tacet discord", "tacet discords", "discord", "discords"]);
 }
 
 function isMonsterListQuestion(message: string) {
   const text = normalize(message);
+  return isMonsterQuestion(text) && (includesAny(text, ["name", "list", "which", "what", "can you name", "tell me some", "show me", "examples", "one monster", "some monsters"]) || detectRequestedMonsterCount(text) !== null);
+}
 
-  const asksForMonsters = isMonsterQuestion(text);
+function isRegionListQuestion(message: string) {
+  const text = normalize(message);
 
-  const asksToList = includesAny(text, [
-    "name",
-    "list",
-    "which",
-    "what",
-    "can you name",
-    "tell me some",
-    "show me",
-    "examples",
-    "one monster",
-    "some monsters",
-  ]);
-
-  const requestedCount = detectRequestedMonsterCount(text);
-
-  return asksForMonsters && (asksToList || requestedCount !== null);
+  return (
+    includesAny(text, [
+      "regions in solaris",
+      "regions of solaris",
+      "regions in solaris-3",
+      "regions of solaris-3",
+      "tell me the regions",
+      "name the regions",
+      "list the regions",
+      "what are the regions",
+      "what regions are there",
+      "tell me about the regions",
+      "regions of this world",
+      "regions in this world",
+      "other regions",
+      "more regions",
+      "tell me more about regions",
+      "tell me more about other regions",
+      "can you tell me more about regions",
+      "can you tell me more about other regions",
+    ]) ||
+    (/\bregions\b/.test(text) &&
+      includesAny(text, [
+        "solaris",
+        "solaris-3",
+        "this world",
+        "the world",
+        "other",
+        "more",
+      ]))
+  );
 }
 
 function isRegionQuestion(message: string) {
   const text = normalize(message);
-
-  return (
-    detectRegion(text) !== null &&
-    includesAny(text, [
-      "what is",
-      "tell me about",
-      "about",
-      "overview",
-      "culture",
-      "governance",
-      "sentinel",
-      "threnodian",
-    ])
-  );
+  return detectRegion(text) !== null && includesAny(text, ["what is", "tell me about", "about", "overview", "culture", "governance", "sentinel", "threnodian", "more about", "describe", "what do you know"]);
 }
 
 function isFactionQuestion(message: string) {
   const text = normalize(message);
+  return detectFaction(text) !== null && includesAny(text, ["what is", "tell me about", "about", "who are", "ideology", "members"]);
+}
 
-  return (
-    detectFaction(text) !== null &&
-    includesAny(text, [
-      "what is",
-      "tell me about",
-      "about",
-      "who are",
-      "ideology",
-      "members",
-    ])
-  );
+function isFactionMemberQuestion(message: string) {
+  const text = normalize(message);
+  return includesAny(text, ["members", "their members", "their names", "name them", "list them", "can you tell me their members", "can you tell me their names"]);
 }
 
 function isLoreEntryQuestion(message: string) {
   const text = normalize(message);
-
   const key = detectLoreEntryKey(text);
   if (!key) return false;
-
-  const region = detectRegion(text);
-  const faction = detectFaction(text);
-
-  // strict fallback: if it's clearly a region/faction/monster list request,
-  // do not let generic lore entry logic steal it
-  if (isMonsterListQuestion(text) && region) return false;
-  if (isRegionQuestion(text) && region) return false;
-  if (isFactionQuestion(text) && faction) return false;
-
+  if (isMonsterListQuestion(text) && detectRegion(text)) return false;
+  if (isRegionQuestion(text) && detectRegion(text)) return false;
+  if (isFactionQuestion(text) && detectFaction(text)) return false;
   return true;
 }
 
@@ -302,12 +267,7 @@ async function fetchMonstersByRegion(regionName: string) {
     .ilike("location", `%${regionName}%`)
     .order("name", { ascending: true })
     .limit(20);
-
-  if (error) {
-    console.error("fetchMonstersByRegion error:", error);
-    return [] as MonsterRow[];
-  }
-
+  if (error) return [] as MonsterRow[];
   return (data ?? []) as MonsterRow[];
 }
 
@@ -317,13 +277,18 @@ async function fetchRegionByName(regionName: string) {
     .select("name, overview, culture, governance, sentinel, threnodian")
     .eq("name", regionName)
     .maybeSingle();
-
-  if (error) {
-    console.error("fetchRegionByName error:", error);
-    return null;
-  }
-
+  if (error) return null;
   return data as RegionRow | null;
+}
+
+async function fetchAllRegions() {
+const { data, error } = await supabaseAdmin
+  .from("regions")
+  .select("*");
+
+console.log("REGION FETCH:", { data, error });
+  if (error) return [] as RegionRow[];
+  return (data ?? []) as RegionRow[];
 }
 
 async function fetchFactionByName(factionName: string) {
@@ -332,12 +297,7 @@ async function fetchFactionByName(factionName: string) {
     .select("name, ideology, members")
     .eq("name", factionName)
     .maybeSingle();
-
-  if (error) {
-    console.error("fetchFactionByName error:", error);
-    return null;
-  }
-
+  if (error) return null;
   return data as FactionRow | null;
 }
 
@@ -347,40 +307,51 @@ async function fetchLoreEntryByKey(key: string) {
     .select("key, content")
     .eq("key", key)
     .maybeSingle();
-
-  if (error) {
-    console.error("fetchLoreEntryByKey error:", error);
-    return null;
-  }
-
+  if (error) return null;
   return data as LoreEntryRow | null;
 }
 
-function buildMonsterFacts(regionName: string, rows: MonsterRow[], requestedCount: number) {
-  if (!rows.length) {
-    return `Question type: monster list
-Region: ${regionName}
-Requested count: ${requestedCount}
-Exact monster matches: none`;
+function parseMembers(raw: string | null | undefined) {
+  const text = trimMarkdownNoise(String(raw ?? ""));
+  if (!text) return [] as string[];
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const names: string[] = [];
+  let inNotes = false;
+
+  for (const line of lines) {
+    const normalized = line.toLowerCase();
+
+    if (/^#+\s*notes?\b/i.test(line) || /^notes?\b/i.test(line)) {
+      inNotes = true;
+      continue;
+    }
+    if (inNotes) continue;
+    if (/^#+\s*notable confirmed members\b/i.test(line) || /^notable confirmed members\b/i.test(line)) {
+      continue;
+    }
+
+    const bulletMatch = line.match(/^[-*•]\s+(.+)$/);
+    if (!bulletMatch) continue;
+
+    const body = bulletMatch[1]
+      .replace(/\([^)]*\)/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const name = body.split(/[—–-]/)[0]?.trim() ?? "";
+    if (!name) continue;
+    if (/^(save changes|cancel changes|set to null)$/i.test(name)) continue;
+    if (!names.some((x) => x.toLowerCase() === name.toLowerCase())) {
+      names.push(name);
+    }
   }
 
-  const lines = rows.map((row, index) => {
-    const parts = [
-      `name=${row.name}`,
-      row.class ? `class=${row.class}` : "",
-      row.element ? `element=${row.element}` : "",
-      row.location ? `location=${row.location}` : "",
-      row.lore ? `lore=${trimMarkdownNoise(row.lore)}` : "",
-    ].filter(Boolean);
-
-    return `${index + 1}. ${parts.join(" | ")}`;
-  });
-
-  return `Question type: monster list
-Region: ${regionName}
-Requested count: ${requestedCount}
-Exact monster matches:
-${lines.join("\n")}`;
+  return names;
 }
 
 function joinNamesNaturally(names: string[]) {
@@ -390,90 +361,88 @@ function joinNamesNaturally(names: string[]) {
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
-function articleFor(word: string) {
-  const first = word.trim().charAt(0).toLowerCase();
-  return ["a", "e", "i", "o", "u"].includes(first) ? "an" : "a";
+function buildIdentityFacts(character: FactualCharacterRow) {
+  return [
+    `Question type: identity`,
+    `Character: ${character.name}`,
+    `Title: ${character.title?.trim() || "N/A"}`,
+    `Identity notes: ${trimMarkdownNoise(character.identity_notes ?? "") || "N/A"}`,
+    `Lore context: ${trimMarkdownNoise(character.lore_context ?? "") || "N/A"}`,
+  ].join("\n");
+}
+
+function buildMonsterFacts(regionName: string, rows: MonsterRow[], requestedCount: number) {
+  if (!rows.length) {
+    return `Question type: monster list\nRegion: ${regionName}\nRequested count: ${requestedCount}\nExact monster matches: none`;
+  }
+  return `Question type: monster list\nRegion: ${regionName}\nRequested count: ${requestedCount}\nExact monster matches:\n${rows.map((row, i) => `${i + 1}. name=${row.name}`).join("\n")}`;
 }
 
 function buildHumanMonsterReply(regionName: string, rows: MonsterRow[], requestedCount: number) {
-  if (!rows.length) {
-    return "I don't have enough information about that.";
-  }
-
-  const picked = rows.slice(0, requestedCount);
-  const names = picked.map((row) => row.name);
-
-  if (picked.length === 1) {
-    const monster = picked[0];
-    const classText = monster.class ? monster.class.toLowerCase() : "";
-    const elementText = monster.element ? monster.element.toLowerCase() : "";
-    const descriptor = [classText, elementText].filter(Boolean).join(" ");
-    const intro = descriptor ? `${articleFor(descriptor)} ${descriptor}` : "one";
-    return `One? ${monster.name}. ${intro.charAt(0).toUpperCase()}${intro.slice(
-      1
-    )} creature found in ${regionName}.`;
-  }
-
-  if (picked.length === 2) {
-    return `In ${regionName}? ${joinNamesNaturally(names)} are two I can name.`;
-  }
-
-  return `In ${regionName}, ${joinNamesNaturally(names)} are ${picked.length} I can name.`;
+  if (!rows.length) return "I don't have enough information about that.";
+  const picked = rows.slice(0, requestedCount).map((r) => r.name);
+  return `In ${regionName}, ${joinNamesNaturally(picked)} are ${picked.length} I can name.`;
 }
 
 function buildRegionFacts(row: RegionRow | null, regionName: string) {
-  if (!row) {
-    return `Question type: region
-Region: ${regionName}
-No matching region data found.`;
-  }
+  if (!row) return `Question type: region\nRegion: ${regionName}\nNo matching region data found.`;
+  return [
+    `Question type: region`,
+    `Region: ${row.name}`,
+    `Overview: ${row.overview ? trimMarkdownNoise(row.overview) : "N/A"}`,
+    `Culture: ${row.culture ? trimMarkdownNoise(row.culture) : "N/A"}`,
+    `Governance: ${row.governance ? trimMarkdownNoise(row.governance) : "N/A"}`,
+    `Sentinel: ${row.sentinel ? trimMarkdownNoise(row.sentinel) : "N/A"}`,
+    `Threnodian: ${row.threnodian ? trimMarkdownNoise(row.threnodian) : "N/A"}`,
+  ].join("\n");
+}
 
-  return `Question type: region
-Region: ${row.name}
-Overview: ${row.overview ? trimMarkdownNoise(row.overview) : "N/A"}
-Culture: ${row.culture ? trimMarkdownNoise(row.culture) : "N/A"}
-Governance: ${row.governance ? trimMarkdownNoise(row.governance) : "N/A"}
-Sentinel: ${row.sentinel ? trimMarkdownNoise(row.sentinel) : "N/A"}
-Threnodian: ${row.threnodian ? trimMarkdownNoise(row.threnodian) : "N/A"}`;
+function buildRegionListReply(rows: RegionRow[]) {
+  if (!rows.length) return "I don't have enough information about that.";
+  return `The regions I can name are ${joinNamesNaturally(rows.map((r) => r.name))}.`;
 }
 
 function buildFactionFacts(row: FactionRow | null, factionName: string) {
-  if (!row) {
-    return `Question type: faction
-Faction: ${factionName}
-No matching faction data found.`;
-  }
+  if (!row) return `Question type: faction\nFaction: ${factionName}\nNo matching faction data found.`;
+  return `Question type: faction\nFaction: ${row.name}\nIdeology: ${row.ideology ? trimMarkdownNoise(row.ideology) : "N/A"}\nMembers: ${row.members ? trimMarkdownNoise(row.members) : "N/A"}`;
+}
 
-  return `Question type: faction
-Faction: ${row.name}
-Ideology: ${row.ideology ? trimMarkdownNoise(row.ideology) : "N/A"}
-Members: ${row.members ? trimMarkdownNoise(row.members) : "N/A"}`;
+function buildFactionMemberReply(row: FactionRow | null) {
+  if (!row) return "I don't have enough information about that.";
+  const names = parseMembers(row.members);
+  if (!names.length) return `I know of ${row.name}, but I do not have a clean member list stored.`;
+  return `If you want the names plainly: ${joinNamesNaturally(names)}.`;
 }
 
 function buildLoreEntryFacts(row: LoreEntryRow | null, key: string) {
-  if (!row?.content) {
-    return `Question type: lore entry
-Key: ${key}
-No matching lore entry found.`;
-  }
-
-  return `Question type: lore entry
-Key: ${key}
-Content: ${trimMarkdownNoise(row.content)}`;
+  if (!row?.content) return `Question type: lore entry\nKey: ${key}\nNo matching lore entry found.`;
+  return `Question type: lore entry\nKey: ${key}\nContent: ${trimMarkdownNoise(row.content)}`;
 }
-
-export async function getDirectFactualAnswer(
-  message: string
-): Promise<FactualAnswerResult> {
+function joinNaturally(values: string[]) {
+  if (values.length === 0) return "";
+  if (values.length === 1) return values[0];
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(", ")}, and ${values[values.length - 1]}`;
+}
+export async function getDirectFactualAnswer(message: string, currentCharacter?: FactualCharacterRow | null): Promise<FactualAnswerResult> {
   const regionName = detectRegion(message);
   const factionName = detectFaction(message);
   const loreEntryKey = detectLoreEntryKey(message);
 
-  // strict priority order:
-  // 1. monster list with region
-  // 2. region
-  // 3. faction
-  // 4. lore entry fallback
+  if (currentCharacter && isIdentityQuestion(message)) {
+    const facts = buildIdentityFacts(currentCharacter);
+    return {
+      answered: true,
+      kind: "identity",
+      facts,
+      debug: {
+        route: "factual",
+        kind: "identity",
+        matched: { character: currentCharacter.name },
+        facts,
+      },
+    };
+  }
 
   if (isMonsterListQuestion(message) && regionName) {
     const requestedCount = detectRequestedMonsterCount(message) ?? 5;
@@ -481,7 +450,6 @@ export async function getDirectFactualAnswer(
     const selected = monsters.slice(0, requestedCount);
     const facts = buildMonsterFacts(regionName, selected, requestedCount);
     const directReply = buildHumanMonsterReply(regionName, monsters, requestedCount);
-
     return {
       answered: true,
       kind: "monster_list",
@@ -490,72 +458,102 @@ export async function getDirectFactualAnswer(
       debug: {
         route: "factual",
         kind: "monster_list",
-        matched: {
-          region: regionName,
-          requestedCount,
-          monsterNames: selected.map((row) => row.name),
-        },
+        matched: { region: regionName, requestedCount, monsterNames: selected.map((r) => r.name) },
         facts,
         reply: directReply,
       },
     };
   }
 
+if (isRegionListQuestion(message)) {
+  const rows = await fetchAllRegions();
+
+  console.log("[region_list] rows from fetchAllRegions:", rows.map((r) => r.name));
+
+  if (!rows.length) {
+    console.log("[region_list] no rows, returning answered:false");
+    return {
+      answered: false,
+      debug: {
+        route: "factual",
+        matched: {
+          region: regionName,
+          faction: factionName,
+          loreEntryKey,
+          character: currentCharacter?.name ?? null,
+        },
+      },
+    };
+  }
+
+  const facts = `Question type: region list\nRegions: ${rows.map((r) => r.name).join(", ")}`;
+  console.log("[region_list] facts built:", facts);
+
+  const directReply = `The known regions of Solaris-3 are ${joinNaturally(
+    rows.map((r) => r.name)
+  )}.`;
+
+  return {
+    answered: true,
+    kind: "region_list",
+    facts,
+    directReply,
+    debug: {
+      route: "factual",
+      kind: "region_list",
+      matched: {},
+      facts,
+      reply: directReply,
+    },
+  };
+}
+
   if (isRegionQuestion(message) && regionName) {
     const region = await fetchRegionByName(regionName);
     const facts = buildRegionFacts(region, regionName);
-
     return {
       answered: true,
       kind: "region",
       facts,
-      debug: {
-        route: "factual",
-        kind: "region",
-        matched: {
-          region: regionName,
-        },
-        facts,
-      },
+      debug: { route: "factual", kind: "region", matched: { region: regionName }, facts },
+    };
+  }
+
+  if (factionName && (isFactionMemberQuestion(message) || (isFactionQuestion(message) && normalize(message).includes("members")))) {
+    const faction = await fetchFactionByName(factionName);
+    const facts = buildFactionFacts(faction, factionName);
+    const directReply = buildFactionMemberReply(faction);
+    return {
+      answered: true,
+      kind: "faction_members",
+      facts,
+      directReply,
+      debug: { route: "factual", kind: "faction_members", matched: { faction: factionName }, facts, reply: directReply },
     };
   }
 
   if (isFactionQuestion(message) && factionName) {
     const faction = await fetchFactionByName(factionName);
     const facts = buildFactionFacts(faction, factionName);
-
     return {
       answered: true,
       kind: "faction",
       facts,
-      debug: {
-        route: "factual",
-        kind: "faction",
-        matched: {
-          faction: factionName,
-        },
-        facts,
-      },
+      debug: { route: "factual", kind: "faction", matched: { faction: factionName }, facts },
     };
   }
 
   if (isLoreEntryQuestion(message) && loreEntryKey) {
-    const entry = await fetchLoreEntryByKey(loreEntryKey);
-    const facts = buildLoreEntryFacts(entry, loreEntryKey);
-
-    return {
-      answered: true,
-      kind: "lore_entry",
-      facts,
-      debug: {
-        route: "factual",
+    const loreEntry = await fetchLoreEntryByKey(loreEntryKey);
+    if (loreEntry?.content) {
+      const facts = buildLoreEntryFacts(loreEntry, loreEntryKey);
+      return {
+        answered: true,
         kind: "lore_entry",
-        matched: {
-          loreEntryKey,
-        },
         facts,
-      },
-    };
+        debug: { route: "factual", kind: "lore_entry", matched: { loreEntryKey }, facts },
+      };
+    }
   }
 
   return {
@@ -566,6 +564,7 @@ export async function getDirectFactualAnswer(
         region: regionName,
         faction: factionName,
         loreEntryKey,
+        character: currentCharacter?.name ?? null,
       },
     },
   };
